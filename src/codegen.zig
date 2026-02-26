@@ -6,6 +6,7 @@ pub const emitter = @import("codegen/emitter.zig");
 pub const types = @import("codegen/types.zig");
 pub const enums = @import("codegen/enums.zig");
 pub const messages = @import("codegen/messages.zig");
+pub const services = @import("codegen/services.zig");
 
 const Emitter = emitter.Emitter;
 
@@ -30,6 +31,16 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
     // Top-level messages
     for (file.messages) |msg| {
         try messages.emit_message(&e, msg, file.syntax);
+        try e.blank_line();
+    }
+
+    // Services
+    if (file.services.len > 0) {
+        try e.print("const rpc = protobuf.rpc;\n", .{});
+        try e.blank_line();
+    }
+    for (file.services) |service| {
+        try services.emit_service(&e, service, file.package);
         try e.blank_line();
     }
 
@@ -91,6 +102,7 @@ test {
     _ = types;
     _ = enums;
     _ = messages;
+    _ = services;
 }
 
 const loc = ast.SourceLocation{ .file = "", .line = 0, .column = 0 };
@@ -350,4 +362,177 @@ test "package_to_path: empty package uses filename" {
     const result = try package_to_path(testing.allocator, "", "test.proto");
     defer testing.allocator.free(result);
     try testing.expectEqualStrings("test.zig", result);
+}
+
+// ── Service integration tests ──────────────────────────────────────
+
+test "generate_file: service with unary method" {
+    var methods = [_]ast.Method{.{
+        .name = "GetFeature",
+        .input_type = "Point",
+        .output_type = "Feature",
+        .client_streaming = false,
+        .server_streaming = false,
+        .options = &.{},
+        .location = loc,
+    }};
+    var file_services = [_]ast.Service{.{
+        .name = "RouteGuide",
+        .methods = &methods,
+        .options = &.{},
+        .location = loc,
+    }};
+
+    var file = make_file(.proto3);
+    file.package = "routeguide";
+    file.services = &file_services;
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    // rpc import
+    try expect_contains(output, "const rpc = protobuf.rpc;");
+    // Service struct
+    try expect_contains(output, "pub const RouteGuide = struct");
+    // Descriptor
+    try expect_contains(output, "pub const service_descriptor = rpc.ServiceDescriptor{");
+    try expect_contains(output, ".name = \"routeguide.RouteGuide\"");
+    try expect_contains(output, ".full_path = \"/routeguide.RouteGuide/GetFeature\"");
+    // Server and Client
+    try expect_contains(output, "pub const Server = struct");
+    try expect_contains(output, "pub const Client = struct");
+}
+
+test "generate_file: all streaming modes" {
+    var methods = [_]ast.Method{
+        .{ .name = "Unary", .input_type = "Req", .output_type = "Resp", .client_streaming = false, .server_streaming = false, .options = &.{}, .location = loc },
+        .{ .name = "ServerStream", .input_type = "Req", .output_type = "Resp", .client_streaming = false, .server_streaming = true, .options = &.{}, .location = loc },
+        .{ .name = "ClientStream", .input_type = "Req", .output_type = "Resp", .client_streaming = true, .server_streaming = false, .options = &.{}, .location = loc },
+        .{ .name = "BidiStream", .input_type = "Req", .output_type = "Resp", .client_streaming = true, .server_streaming = true, .options = &.{}, .location = loc },
+    };
+    var file_services = [_]ast.Service{.{
+        .name = "TestService",
+        .methods = &methods,
+        .options = &.{},
+        .location = loc,
+    }};
+
+    var file = make_file(.proto3);
+    file.services = &file_services;
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    // Server VTable
+    try expect_contains(output, "unary: *const fn (*anyopaque, *rpc.Context, Req) rpc.RpcError!Resp,");
+    try expect_contains(output, "server_stream: *const fn (*anyopaque, *rpc.Context, Req, rpc.SendStream(Resp)) rpc.RpcError!void,");
+    try expect_contains(output, "client_stream: *const fn (*anyopaque, *rpc.Context, rpc.RecvStream(Req)) rpc.RpcError!Resp,");
+    try expect_contains(output, "bidi_stream: *const fn (*anyopaque, *rpc.Context, rpc.RecvStream(Req), rpc.SendStream(Resp)) rpc.RpcError!void,");
+
+    // Client
+    try expect_contains(output, "pub fn unary(self: Client, ctx: *rpc.Context, req: Req) rpc.RpcError!Resp");
+    try expect_contains(output, "pub fn server_stream(self: Client, ctx: *rpc.Context, req: Req) rpc.RpcError!rpc.RecvStream(Resp)");
+    try expect_contains(output, "pub fn client_stream(self: Client, ctx: *rpc.Context) rpc.RpcError!rpc.ClientStreamCall(Req, Resp)");
+    try expect_contains(output, "pub fn bidi_stream(self: Client, ctx: *rpc.Context) rpc.RpcError!rpc.BidiStreamCall(Req, Resp)");
+}
+
+test "generate_file: service with package path" {
+    var methods = [_]ast.Method{.{
+        .name = "DoThing",
+        .input_type = "Req",
+        .output_type = "Resp",
+        .client_streaming = false,
+        .server_streaming = false,
+        .options = &.{},
+        .location = loc,
+    }};
+    var file_services = [_]ast.Service{.{
+        .name = "Svc",
+        .methods = &methods,
+        .options = &.{},
+        .location = loc,
+    }};
+
+    var file = make_file(.proto3);
+    file.package = "pkg";
+    file.services = &file_services;
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    try expect_contains(output, ".name = \"pkg.Svc\"");
+    try expect_contains(output, ".full_path = \"/pkg.Svc/DoThing\"");
+}
+
+test "generate_file: service without package" {
+    var methods = [_]ast.Method{.{
+        .name = "DoThing",
+        .input_type = "Req",
+        .output_type = "Resp",
+        .client_streaming = false,
+        .server_streaming = false,
+        .options = &.{},
+        .location = loc,
+    }};
+    var file_services = [_]ast.Service{.{
+        .name = "Svc",
+        .methods = &methods,
+        .options = &.{},
+        .location = loc,
+    }};
+
+    var file = make_file(.proto3);
+    file.services = &file_services;
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    try expect_contains(output, ".name = \"Svc\"");
+    try expect_contains(output, ".full_path = \"/Svc/DoThing\"");
+}
+
+test "generate_file: multiple services" {
+    var methods1 = [_]ast.Method{.{
+        .name = "Do",
+        .input_type = "A",
+        .output_type = "B",
+        .client_streaming = false,
+        .server_streaming = false,
+        .options = &.{},
+        .location = loc,
+    }};
+    var methods2 = [_]ast.Method{.{
+        .name = "Run",
+        .input_type = "C",
+        .output_type = "D",
+        .client_streaming = false,
+        .server_streaming = false,
+        .options = &.{},
+        .location = loc,
+    }};
+    var file_services = [_]ast.Service{
+        .{ .name = "Svc1", .methods = &methods1, .options = &.{}, .location = loc },
+        .{ .name = "Svc2", .methods = &methods2, .options = &.{}, .location = loc },
+    };
+
+    var file = make_file(.proto3);
+    file.services = &file_services;
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    try expect_contains(output, "pub const Svc1 = struct");
+    try expect_contains(output, "pub const Svc2 = struct");
+}
+
+test "generate_file: no rpc import without services" {
+    const file = make_file(.proto3);
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    // Should NOT contain rpc import when there are no services
+    if (std.mem.indexOf(u8, output, "const rpc = protobuf.rpc;") != null) {
+        return error.TestExpectedEqual;
+    }
 }
