@@ -25,12 +25,33 @@ pub const LinkError = error{
     LinkFailed,
 };
 
+pub const FileLoader = struct {
+    ptr: *anyopaque,
+    load_fn: *const fn (*anyopaque, []const u8, std.mem.Allocator) LinkError![]const u8,
+
+    pub fn load(self: FileLoader, path: []const u8, allocator: std.mem.Allocator) LinkError![]const u8 {
+        return self.load_fn(self.ptr, path, allocator);
+    }
+
+    /// Create a FileLoader from a bare function pointer (no context needed).
+    pub fn wrap(comptime load_fn: fn ([]const u8, std.mem.Allocator) LinkError![]const u8) FileLoader {
+        return .{
+            .ptr = undefined,
+            .load_fn = &struct {
+                fn f(_: *anyopaque, path: []const u8, allocator: std.mem.Allocator) LinkError![]const u8 {
+                    return load_fn(path, allocator);
+                }
+            }.f,
+        };
+    }
+};
+
 // ── Linker ────────────────────────────────────────────────────────────
 
 pub const Linker = struct {
     allocator: std.mem.Allocator,
     diagnostics: *parser_mod.DiagnosticList,
-    file_loader: *const fn ([]const u8, std.mem.Allocator) LinkError![]const u8,
+    file_loader: FileLoader,
 
     // Internal state
     loaded_files: std.StringHashMap(ast.File),
@@ -40,7 +61,7 @@ pub const Linker = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         diagnostics: *parser_mod.DiagnosticList,
-        file_loader: *const fn ([]const u8, std.mem.Allocator) LinkError![]const u8,
+        file_loader: FileLoader,
     ) Linker {
         return .{
             .allocator = allocator,
@@ -109,7 +130,7 @@ pub const Linker = struct {
             try self.loading_stack.append(self.allocator, import_decl.path);
 
             // Load and parse
-            const source = self.file_loader(import_decl.path, self.allocator) catch {
+            const source = self.file_loader.load(import_decl.path, self.allocator) catch {
                 try self.add_error(import_decl.location, "import not found");
                 _ = self.loading_stack.pop();
                 continue;
@@ -349,9 +370,10 @@ pub const Linker = struct {
 // Tests
 // ══════════════════════════════════════════════════════════════════════
 
-fn no_loader(_: []const u8, _: std.mem.Allocator) LinkError![]const u8 {
+fn no_load(_: []const u8, _: std.mem.Allocator) LinkError![]const u8 {
     return error.LinkFailed;
 }
+const no_loader = FileLoader.wrap(no_load);
 
 fn parse_source(arena: std.mem.Allocator, source: []const u8, diags: *parser_mod.DiagnosticList) !ast.File {
     const lex = lexer_mod.Lexer.init(source, "test.proto");
@@ -382,7 +404,7 @@ test "Linker: single file, field type resolves" {
         \\message Bar { Foo foo = 1; }
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     const result = try linker.link(&files);
 
@@ -407,7 +429,7 @@ test "Linker: nested type resolution" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -429,7 +451,7 @@ test "Linker: scope walking resolves sibling message" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -449,7 +471,7 @@ test "Linker: absolute reference" {
         \\message Bar { .test.Foo foo = 1; }
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -469,11 +491,11 @@ test "Linker: import resolution" {
         \\message Dep { int32 id = 1; }
     ;
 
-    const loader = struct {
+    const loader = FileLoader.wrap(struct {
         fn load(_: []const u8, _: std.mem.Allocator) LinkError![]const u8 {
             return dep_source;
         }
-    }.load;
+    }.load);
 
     var diags: parser_mod.DiagnosticList = .empty;
     const file = try parse_source(arena,
@@ -483,7 +505,7 @@ test "Linker: import resolution" {
         \\message Msg { dep.Dep dep = 1; }
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &loader);
+    var linker = Linker.init(arena, &diags, loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -506,7 +528,7 @@ test "Linker: duplicate field numbers" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -529,7 +551,7 @@ test "Linker: reserved range conflict" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -552,7 +574,7 @@ test "Linker: reserved name conflict" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -574,7 +596,7 @@ test "Linker: proto3 enum first value not zero" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -596,7 +618,7 @@ test "Linker: unresolved type reference" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -618,7 +640,7 @@ test "Linker: invalid map key type" {
         \\}
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -639,7 +661,7 @@ test "Linker: circular import detected" {
         \\message B { int32 x = 1; }
     ;
 
-    const loader = struct {
+    const loader = FileLoader.wrap(struct {
         fn load(path: []const u8, _: std.mem.Allocator) LinkError![]const u8 {
             if (std.mem.eql(u8, path, "b.proto")) return b_source;
             // If trying to load a.proto from b.proto, that's the circular case.
@@ -651,7 +673,7 @@ test "Linker: circular import detected" {
             ;
             return error.LinkFailed;
         }
-    }.load;
+    }.load);
 
     var diags: parser_mod.DiagnosticList = .empty;
     const file = try parse_source(arena,
@@ -660,7 +682,7 @@ test "Linker: circular import detected" {
         \\message A { int32 y = 1; }
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &loader);
+    var linker = Linker.init(arena, &diags, loader);
     const files: [1]ast.File = .{file};
     _ = try linker.link(&files);
 
@@ -685,7 +707,7 @@ test "Linker: type registry contains all types" {
         \\enum TopEnum { ZERO = 0; }
     , &diags);
 
-    var linker = Linker.init(arena, &diags, &no_loader);
+    var linker = Linker.init(arena, &diags, no_loader);
     const files: [1]ast.File = .{file};
     const result = try linker.link(&files);
 
