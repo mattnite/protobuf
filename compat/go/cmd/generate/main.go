@@ -26,6 +26,7 @@ func main() {
 		{"edge3", testcases.GenerateEdge3()},
 		{"scalar2", testcases.GenerateScalar2()},
 		{"required2", testcases.GenerateRequired2()},
+		{"acp", testcases.GenerateAcp()},
 	}
 
 	outDir := filepath.Join("..", "testdata", "go")

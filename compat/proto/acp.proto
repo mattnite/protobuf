@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package acp;
+
+enum AcpMessageKind {
+  HELLO = 0;
+  HELLO_STATUS = 1;
+  REQUEST = 2;
+  DISCOVER_REQUEST = 3;
+  DISCOVER = 4;
+  READY = 5;
+  UPDATED = 6;
+  DELETED = 7;
+  MANIFEST_REQUEST = 8;
+  MANIFEST = 9;
+  STATUS_REQUEST = 10;
+  STATUS = 11;
+  DELOAD = 12;
+}
+
+enum AcpStatusCode {
+  OK = 0;
+  NOT_FOUND = 1;
+  BAD_REQUEST = 2;
+  INTERNAL_ERROR = 3;
+}
+
+message AcpAssetMetadata {
+  string uri = 1;
+  string cache_path = 2;
+  string payload_hash = 3;
+  int64 file_length = 4;
+  int64 uri_version = 5;
+  int64 updated_at_ns = 6;
+}
+
+message AcpMessage {
+  optional uint32 version = 1;
+  AcpMessageKind kind = 2;
+  uint64 request_id = 3;
+  optional string uri = 4;
+  optional bool force_recook = 5;
+  repeated string uris = 6;
+  optional AcpStatusCode status = 7;
+  optional string detail = 8;
+  optional AcpAssetMetadata metadata = 9;
+  uint32 chunk_index = 10;
+  uint32 chunk_total = 11;
+}
