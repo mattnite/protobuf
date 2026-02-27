@@ -12,6 +12,12 @@ const Emitter = emitter.Emitter;
 
 /// Generate a complete Zig source file from a proto AST File.
 pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
+    // Same-file extension flattening: merge extend blocks into target messages.
+    try flatten_extensions(allocator, file.messages, file.extensions);
+    for (file.messages) |*msg| {
+        try flatten_message_extensions(allocator, msg);
+    }
+
     // Resolve enum type references before codegen.
     // Collect file-level enum names, then walk all messages to replace
     // .named TypeRefs with .enum_ref where the name matches an enum.
@@ -106,6 +112,79 @@ pub fn package_to_path(allocator: std.mem.Allocator, package: ?[]const u8, proto
     @memcpy(result[0..stem.len], stem);
     @memcpy(result[stem.len..][0..4], ".zig");
     return result;
+}
+
+// ── Extension Flattening ──────────────────────────────────────────────
+
+/// Flatten extensions from a list of Extend blocks into target messages.
+fn flatten_extensions(allocator: std.mem.Allocator, msgs: []ast.Message, extensions: []const ast.Extend) !void {
+    for (extensions) |ext| {
+        // Find the target message by name (simple name match within the file)
+        for (msgs) |*msg| {
+            if (std.mem.eql(u8, msg.name, ext.type_name)) {
+                try merge_extension_fields(allocator, msg, ext);
+                break;
+            }
+            // Also check nested messages
+            if (try find_and_merge_nested(allocator, msg.nested_messages, ext)) break;
+        }
+    }
+}
+
+/// Recursively walk nested messages to find extension target.
+fn find_and_merge_nested(allocator: std.mem.Allocator, nested: []ast.Message, ext: ast.Extend) !bool {
+    for (nested) |*msg| {
+        if (std.mem.eql(u8, msg.name, ext.type_name)) {
+            try merge_extension_fields(allocator, msg, ext);
+            return true;
+        }
+        if (try find_and_merge_nested(allocator, msg.nested_messages, ext)) return true;
+    }
+    return false;
+}
+
+/// Merge extension fields into the target message, validating field numbers
+/// fall within the message's declared extension_ranges.
+fn merge_extension_fields(allocator: std.mem.Allocator, msg: *ast.Message, ext: ast.Extend) !void {
+    // Collect valid extension fields
+    var valid_fields: std.ArrayListUnmanaged(ast.Field) = .empty;
+    defer valid_fields.deinit(allocator);
+
+    for (ext.fields) |field| {
+        if (field_in_extension_ranges(field.number, msg.extension_ranges)) {
+            try valid_fields.append(allocator, field);
+        }
+    }
+
+    if (valid_fields.items.len == 0) return;
+
+    // Create new combined fields slice
+    const new_fields = try allocator.alloc(ast.Field, msg.fields.len + valid_fields.items.len);
+    @memcpy(new_fields[0..msg.fields.len], msg.fields);
+    @memcpy(new_fields[msg.fields.len..], valid_fields.items);
+    msg.fields = new_fields;
+}
+
+fn field_in_extension_ranges(number: i32, ranges: []const ast.ExtensionRange) bool {
+    // If no extension ranges declared, accept any field (permissive)
+    if (ranges.len == 0) return true;
+    for (ranges) |range| {
+        if (number >= range.start and number <= range.end) return true;
+    }
+    return false;
+}
+
+/// Flatten extensions declared within a message (msg.extensions).
+fn flatten_message_extensions(allocator: std.mem.Allocator, msg: *ast.Message) !void {
+    // Process extensions within this message
+    if (msg.extensions.len > 0) {
+        // Extensions within a message can target the message itself or its nested messages
+        try flatten_extensions(allocator, msg.nested_messages, msg.extensions);
+    }
+    // Recurse into nested messages
+    for (msg.nested_messages) |*nested| {
+        try flatten_message_extensions(allocator, nested);
+    }
 }
 
 // ── Enum Reference Resolution ─────────────────────────────────────────

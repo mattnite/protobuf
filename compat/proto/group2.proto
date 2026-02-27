@@ -1,0 +1,10 @@
+syntax = "proto2";
+
+
+message GroupMessage {
+    optional group MyGroup = 1 {
+        optional int32 value = 2;
+        optional string label = 3;
+    }
+    optional int32 after_group = 4;
+}

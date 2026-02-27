@@ -14,7 +14,7 @@ comptime {
     _ = message;
 }
 
-pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) std.mem.Allocator.Error!void {
     try e.print("pub const {s} = struct", .{msg.name});
     try e.open_brace();
 
@@ -36,9 +36,20 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
         try e.blank_line();
     }
 
+    // Group types (emit as nested structs)
+    for (msg.groups) |group| {
+        try emit_group_struct(e, group, syntax);
+        try e.blank_line();
+    }
+
     // Regular fields
     for (msg.fields) |field| {
         try emit_field(e, field, syntax);
+    }
+
+    // Group fields on the parent struct
+    for (msg.groups) |group| {
+        try emit_group_field(e, group);
     }
 
     // Map fields
@@ -56,6 +67,16 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
 
     // Unknown fields
     try e.print("_unknown_fields: []const u8 = \"\",\n", .{});
+
+    // Getter methods for optional fields with custom defaults
+    for (msg.fields) |field| {
+        if (field.label == .optional) {
+            if (types.extract_default(field.options)) |def| {
+                try e.blank_line();
+                try emit_getter_method(e, field, def);
+            }
+        }
+    }
 
     // Methods
     try e.blank_line();
@@ -87,8 +108,14 @@ fn emit_field(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                     try e.print("{f}: ?{s} = null,\n", .{ escaped, types.scalar_zig_type(s) });
                 },
                 .required => {
-                    // Proto2 required: non-nullable with zero default
-                    try e.print("{f}: {s} = {s},\n", .{ escaped, types.scalar_zig_type(s), types.scalar_default_value(s) });
+                    // Proto2 required: non-nullable with custom or zero default
+                    if (types.extract_default(field.options)) |def| {
+                        var def_buf: [256]u8 = undefined;
+                        const def_lit = types.emit_default_literal(def, s, &def_buf);
+                        try e.print("{f}: {s} = {s},\n", .{ escaped, types.scalar_zig_type(s), def_lit });
+                    } else {
+                        try e.print("{f}: {s} = {s},\n", .{ escaped, types.scalar_zig_type(s), types.scalar_default_value(s) });
+                    }
                 },
                 .implicit => {
                     // Proto3 implicit: non-nullable with zero default
@@ -123,7 +150,13 @@ fn emit_field(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                     try e.print("{f}: ?{s} = null,\n", .{ escaped, name });
                 },
                 .required => {
-                    try e.print("{f}: {s} = @enumFromInt(0),\n", .{ escaped, name });
+                    if (types.extract_default(field.options)) |def| {
+                        var def_buf: [256]u8 = undefined;
+                        const def_lit = types.emit_default_literal(def, .int32, &def_buf);
+                        try e.print("{f}: {s} = {s},\n", .{ escaped, name, def_lit });
+                    } else {
+                        try e.print("{f}: {s} = @enumFromInt(0),\n", .{ escaped, name });
+                    }
                 },
                 .implicit => {
                     try e.print("{f}: {s} = @enumFromInt(0),\n", .{ escaped, name });
@@ -131,6 +164,252 @@ fn emit_field(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
             }
         },
     }
+}
+
+fn emit_getter_method(e: *Emitter, field: ast.Field, def: ast.Constant) !void {
+    const escaped = types.escape_zig_keyword(field.name);
+    const return_type = switch (field.type_name) {
+        .scalar => |s| types.scalar_zig_type(s),
+        .enum_ref => |name| name,
+        .named => |name| name,
+    };
+    const scalar_for_literal: ast.ScalarType = switch (field.type_name) {
+        .scalar => |s| s,
+        .enum_ref => .int32,
+        .named => .int32,
+    };
+    var def_buf: [256]u8 = undefined;
+    const def_lit = types.emit_default_literal(def, scalar_for_literal, &def_buf);
+
+    try e.print("pub fn get_{f}(self: @This()) {s}", .{ escaped, return_type });
+    try e.open_brace();
+    try e.print("return self.{f} orelse {s};\n", .{ escaped, def_lit });
+    try e.close_brace_nosemi();
+}
+
+fn emit_group_struct(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    // Groups are like mini-messages: emit as nested struct
+    try e.print("pub const {s} = struct", .{group.name});
+    try e.open_brace();
+
+    // Nested enums
+    for (group.nested_enums) |nested_enum| {
+        try enums.emit_enum(e, nested_enum, syntax);
+        try e.blank_line();
+    }
+
+    // Nested messages
+    for (group.nested_messages) |nested_msg| {
+        try emit_message(e, nested_msg, syntax);
+        try e.blank_line();
+    }
+
+    // Fields
+    for (group.fields) |field| {
+        try emit_field(e, field, syntax);
+    }
+
+    // Unknown fields
+    try e.print("_unknown_fields: []const u8 = \"\",\n", .{});
+
+    // Encode method (same as message encode but without unknown fields tracking on output)
+    try e.blank_line();
+    try emit_group_encode_method(e, group, syntax);
+
+    // Calc size method
+    try e.blank_line();
+    try emit_group_calc_size_method(e, group, syntax);
+
+    // Decode group method (reads until matching egroup tag)
+    try e.blank_line();
+    try emit_group_decode_method(e, group, syntax);
+
+    // Deinit
+    try e.blank_line();
+    try emit_group_deinit_method(e, group);
+
+    // JSON methods
+    try e.blank_line();
+    try emit_group_to_json_method(e, group, syntax);
+    try e.blank_line();
+    try emit_group_from_json_method(e, group, syntax);
+
+    try e.close_brace();
+}
+
+fn emit_group_field(e: *Emitter, group: ast.Group) !void {
+    // Convert group name to lowercase field name
+    var name_buf: [256]u8 = undefined;
+    var name_len: usize = 0;
+    for (group.name) |c| {
+        name_buf[name_len] = std.ascii.toLower(c);
+        name_len += 1;
+    }
+    const field_name = name_buf[0..name_len];
+    const escaped = types.escape_zig_keyword(field_name);
+
+    switch (group.label) {
+        .optional => {
+            try e.print("{f}: ?{s} = null,\n", .{ escaped, group.name });
+        },
+        .required => {
+            try e.print("{f}: {s} = .{{}},\n", .{ escaped, group.name });
+        },
+        .repeated => {
+            try e.print("{f}: []const {s} = &.{{}},\n", .{ escaped, group.name });
+        },
+        .implicit => {
+            try e.print("{f}: ?{s} = null,\n", .{ escaped, group.name });
+        },
+    }
+}
+
+fn group_field_name(group_name: []const u8, buf: []u8) []const u8 {
+    var len: usize = 0;
+    for (group_name) |c| {
+        buf[len] = std.ascii.toLower(c);
+        len += 1;
+    }
+    return buf[0..len];
+}
+
+fn emit_group_encode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    try e.print("pub fn encode(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+    try e.print("const mw = message.MessageWriter.init(writer);\n", .{});
+    for (group.fields) |field| {
+        try emit_encode_field(e, field, syntax);
+    }
+    try e.print("if (self._unknown_fields.len > 0) try writer.writeAll(self._unknown_fields);\n", .{});
+    try e.close_brace_nosemi();
+}
+
+fn emit_group_calc_size_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    try e.print("pub fn calc_size(self: @This()) usize", .{});
+    try e.open_brace();
+    try e.print("var size: usize = 0;\n", .{});
+    for (group.fields) |field| {
+        try emit_size_field(e, field, syntax);
+    }
+    try e.print("size += self._unknown_fields.len;\n", .{});
+    try e.print("return size;\n", .{});
+    try e.close_brace_nosemi();
+}
+
+fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    try e.print("pub fn decode_group(allocator: std.mem.Allocator, iter: *message.FieldIterator, group_field_number: u29) !@This()", .{});
+    try e.open_brace();
+    try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("while (try iter.next()) |field|", .{});
+    try e.open_brace();
+    // Check for egroup matching the group field number
+    try e.print("if (field.value == .egroup and field.number == group_field_number) return result;\n", .{});
+    try e.print("switch (field.number)", .{});
+    try e.open_brace();
+
+    // Use iter.data as the bytes source for nested decodes
+    for (group.fields) |field| {
+        try emit_decode_field_case(e, field, syntax);
+    }
+
+    // Unknown field handling (including nested sgroups)
+    try e.print("else => switch (field.value)", .{});
+    try e.open_brace();
+    try e.print(".sgroup => try message.skip_group(iter.data, &iter.pos, field.number),\n", .{});
+    try e.print("else => {{}},\n", .{});
+    try e.close_brace_comma();
+
+    try e.close_brace_nosemi(); // switch
+    try e.close_brace_nosemi(); // while
+    try e.print("return error.EndOfStream;\n", .{});
+    try e.close_brace_nosemi(); // fn
+}
+
+fn emit_group_deinit_method(e: *Emitter, group: ast.Group) !void {
+    try e.print("pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void", .{});
+    try e.open_brace();
+    for (group.fields) |field| {
+        try emit_deinit_field(e, field);
+    }
+    try e.print("if (self._unknown_fields.len > 0) allocator.free(self._unknown_fields);\n", .{});
+    try e.close_brace_nosemi();
+}
+
+fn emit_group_to_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !void {
+    try e.print("pub fn to_json(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+    try e.print("try json.write_object_start(writer);\n", .{});
+    try e.print("var first = true;\n", .{});
+    for (group.fields) |field| {
+        try emit_json_field(e, field, .proto2);
+    }
+    try e.print("try json.write_object_end(writer);\n", .{});
+    try e.close_brace_nosemi();
+}
+
+fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !void {
+    const json_mod = "json";
+
+    // from_json entry point
+    try e.print("pub fn from_json(allocator: std.mem.Allocator, json_bytes: []const u8) !@This()", .{});
+    try e.open_brace();
+    try e.print("var scanner = {s}.JsonScanner.init(allocator, json_bytes);\n", .{json_mod});
+    try e.print("defer scanner.deinit();\n", .{});
+    try e.print("return try @This().from_json_scanner(allocator, &scanner);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_json_scanner
+    try e.print("pub fn from_json_scanner(allocator: std.mem.Allocator, scanner: *{s}.JsonScanner) !@This()", .{json_mod});
+    try e.open_brace();
+    try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("if (start_tok != .object_start) return error.UnexpectedToken;\n", .{});
+    try e.print("while (true)", .{});
+    try e.open_brace();
+    try e.print("const tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("switch (tok)", .{});
+    try e.open_brace();
+    try e.print(".object_end => return result,\n", .{});
+    try e.print(".string => |key|", .{});
+    try e.open_brace();
+
+    // Null check
+    try e.print("if (try scanner.peek()) |peeked| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (peeked == .null_value) {{\n", .{});
+    e.indent_level += 1;
+    try e.print("_ = try scanner.next();\n", .{});
+    try e.print("continue;\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+
+    // Field matching
+    var first_branch = true;
+    for (group.fields) |field| {
+        try emit_from_json_field_branch(e, field, .proto2, &first_branch);
+    }
+
+    // else: skip unknown
+    if (first_branch) {
+        try e.print("try {s}.skip_value(scanner);\n", .{json_mod});
+    } else {
+        try e.print(" else {{\n", .{});
+        e.indent_level += 1;
+        try e.print("try {s}.skip_value(scanner);\n", .{json_mod});
+        e.indent_level -= 1;
+        try e.print("}}\n", .{});
+    }
+
+    try e.close_brace_comma(); // .string => |key| { ... },
+    try e.print("else => return error.UnexpectedToken,\n", .{});
+    try e.close_brace_nosemi(); // switch
+    try e.close_brace_nosemi(); // while
+    try e.print("return result;\n", .{});
+    try e.close_brace_nosemi(); // fn
 }
 
 fn emit_map_field(e: *Emitter, map_field: ast.MapField) !void {
@@ -216,6 +495,7 @@ fn emit_encode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
             .field => |f| try emit_encode_field(e, f, syntax),
             .map => |m| try emit_encode_map(e, m),
             .oneof => |o| try emit_encode_oneof(e, o),
+            .group => |g| try emit_encode_group(e, g),
         }
     }
 
@@ -540,6 +820,49 @@ fn emit_encode_oneof(e: *Emitter, oneof: ast.Oneof) !void {
     try e.close_brace();
 }
 
+fn emit_encode_group(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+    const num = grp.number;
+
+    switch (grp.label) {
+        .optional => {
+            try e.print("if (self.{f}) |grp|", .{escaped});
+            try e.open_brace();
+            try e.print("try mw.write_sgroup_field({d});\n", .{num});
+            try e.print("try grp.encode(writer);\n", .{});
+            try e.print("try mw.write_egroup_field({d});\n", .{num});
+            try e.close_brace_nosemi();
+        },
+        .required => {
+            try e.print("{{\n", .{});
+            e.indent_level += 1;
+            try e.print("try mw.write_sgroup_field({d});\n", .{num});
+            try e.print("try self.{f}.encode(writer);\n", .{escaped});
+            try e.print("try mw.write_egroup_field({d});\n", .{num});
+            e.indent_level -= 1;
+            try e.print("}}\n", .{});
+        },
+        .repeated => {
+            try e.print("for (self.{f}) |grp|", .{escaped});
+            try e.open_brace();
+            try e.print("try mw.write_sgroup_field({d});\n", .{num});
+            try e.print("try grp.encode(writer);\n", .{});
+            try e.print("try mw.write_egroup_field({d});\n", .{num});
+            try e.close_brace_nosemi();
+        },
+        .implicit => {
+            try e.print("if (self.{f}) |grp|", .{escaped});
+            try e.open_brace();
+            try e.print("try mw.write_sgroup_field({d});\n", .{num});
+            try e.print("try grp.encode(writer);\n", .{});
+            try e.print("try mw.write_egroup_field({d});\n", .{num});
+            try e.close_brace_nosemi();
+        },
+    }
+}
+
 // ── Calc Size Method ──────────────────────────────────────────────────
 
 fn emit_calc_size_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
@@ -555,6 +878,7 @@ fn emit_calc_size_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
             .field => |f| try emit_size_field(e, f, syntax),
             .map => |m| try emit_size_map(e, m),
             .oneof => |o| try emit_size_oneof(e, o),
+            .group => |g| try emit_size_group(e, g),
         }
     }
 
@@ -767,6 +1091,28 @@ fn emit_size_oneof(e: *Emitter, oneof: ast.Oneof) !void {
     try e.close_brace();
 }
 
+fn emit_size_group(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+    const num = grp.number;
+
+    switch (grp.label) {
+        .optional => {
+            try e.print("if (self.{f}) |grp| size += message.sgroup_tag_size({d}) + grp.calc_size() + message.egroup_tag_size({d});\n", .{ escaped, num, num });
+        },
+        .required => {
+            try e.print("size += message.sgroup_tag_size({d}) + self.{f}.calc_size() + message.egroup_tag_size({d});\n", .{ num, escaped, num });
+        },
+        .repeated => {
+            try e.print("for (self.{f}) |grp| size += message.sgroup_tag_size({d}) + grp.calc_size() + message.egroup_tag_size({d});\n", .{ escaped, num, num });
+        },
+        .implicit => {
+            try e.print("if (self.{f}) |grp| size += message.sgroup_tag_size({d}) + grp.calc_size() + message.egroup_tag_size({d});\n", .{ escaped, num, num });
+        },
+    }
+}
+
 // ── Decode Method ─────────────────────────────────────────────────────
 
 fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
@@ -796,8 +1142,17 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
         }
     }
 
-    // else => unknown fields (skip for now)
+    // Group fields
+    for (msg.groups) |grp| {
+        try emit_decode_group_case(e, grp);
+    }
+
+    // else => unknown fields — skip, including sgroup wire types
+    try e.print("else => switch (field.value)", .{});
+    try e.open_brace();
+    try e.print(".sgroup => try message.skip_group(bytes, &iter.pos, field.number),\n", .{});
     try e.print("else => {{}},\n", .{});
+    try e.close_brace_comma();
 
     try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
@@ -1080,6 +1435,35 @@ fn emit_decode_oneof_field_case(e: *Emitter, field: ast.Field, oneof: ast.Oneof)
     }
 }
 
+fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+    const num = grp.number;
+
+    try e.print("{d} => ", .{num});
+    switch (grp.label) {
+        .optional, .implicit => {
+            try e.print_raw("result.{f} = try {s}.decode_group(allocator, &iter, {d}),\n", .{ escaped, grp.name, num });
+        },
+        .required => {
+            try e.print_raw("result.{f} = try {s}.decode_group(allocator, &iter, {d}),\n", .{ escaped, grp.name, num });
+        },
+        .repeated => {
+            try e.print_raw("", .{});
+            try e.open_brace();
+            try e.print("const old = result.{f};\n", .{escaped});
+            try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{grp.name});
+            try e.print("@memcpy(new[0..old.len], old);\n", .{});
+            try e.print("new[old.len] = try {s}.decode_group(allocator, &iter, {d});\n", .{ grp.name, num });
+            try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+            try e.print("result.{f} = new;\n", .{escaped});
+            e.indent_level -= 1;
+            try e.print("}},\n", .{});
+        },
+    }
+}
+
 // ── Deinit Method ─────────────────────────────────────────────────────
 
 fn emit_deinit_method(e: *Emitter, msg: ast.Message, _: ast.Syntax) !void {
@@ -1099,6 +1483,11 @@ fn emit_deinit_method(e: *Emitter, msg: ast.Message, _: ast.Syntax) !void {
     // Oneof fields
     for (msg.oneofs) |oneof| {
         try emit_deinit_oneof(e, oneof);
+    }
+
+    // Group fields
+    for (msg.groups) |grp| {
+        try emit_deinit_group(e, grp);
     }
 
     // Unknown fields
@@ -1214,6 +1603,30 @@ fn emit_deinit_oneof(e: *Emitter, oneof: ast.Oneof) !void {
     try e.close_brace();
 }
 
+fn emit_deinit_group(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+
+    switch (grp.label) {
+        .optional, .implicit => {
+            try e.print("if (self.{f}) |*grp| grp.deinit(allocator);\n", .{escaped});
+        },
+        .required => {
+            try e.print("self.{f}.deinit(allocator);\n", .{escaped});
+        },
+        .repeated => {
+            try e.print("for (self.{f}) |item| {{\n", .{escaped});
+            e.indent_level += 1;
+            try e.print("var m = item;\n", .{});
+            try e.print("m.deinit(allocator);\n", .{});
+            e.indent_level -= 1;
+            try e.print("}}\n", .{});
+            try e.print("if (self.{f}.len > 0) allocator.free(self.{f});\n", .{ escaped, escaped });
+        },
+    }
+}
+
 // ── JSON Serialization Method ──────────────────────────────────────────
 
 fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
@@ -1230,6 +1643,7 @@ fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void 
             .field => |f| try emit_json_field(e, f, syntax),
             .map => |m| try emit_json_map(e, m),
             .oneof => |o| try emit_json_oneof(e, o),
+            .group => |g| try emit_json_group(e, g),
         }
     }
 
@@ -1545,6 +1959,49 @@ fn emit_json_map_value(e: *Emitter, value_type: ast.TypeRef) !void {
     }
 }
 
+fn emit_json_group(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+    // Use lowercase field name as JSON key
+    var json_name_buf: [256]u8 = undefined;
+    const jname = types.snake_to_lower_camel(field_name, &json_name_buf);
+
+    switch (grp.label) {
+        .optional, .implicit => {
+            try e.print("if (self.{f}) |grp|", .{escaped});
+            try e.open_brace();
+            try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+            try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+            try e.print("try grp.to_json(writer);\n", .{});
+            try e.close_brace_nosemi();
+        },
+        .required => {
+            try e.print("{{\n", .{});
+            e.indent_level += 1;
+            try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+            try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+            try e.print("try self.{f}.to_json(writer);\n", .{escaped});
+            e.indent_level -= 1;
+            try e.print("}}\n", .{});
+        },
+        .repeated => {
+            try e.print("if (self.{f}.len > 0)", .{escaped});
+            try e.open_brace();
+            try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+            try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+            try e.print("try json.write_array_start(writer);\n", .{});
+            try e.print("for (self.{f}, 0..) |item, i|", .{escaped});
+            try e.open_brace();
+            try e.print("if (i > 0) try writer.writeByte(',');\n", .{});
+            try e.print("try item.to_json(writer);\n", .{});
+            try e.close_brace_nosemi();
+            try e.print("try json.write_array_end(writer);\n", .{});
+            try e.close_brace_nosemi();
+        },
+    }
+}
+
 fn emit_json_oneof(e: *Emitter, oneof: ast.Oneof) !void {
     const escaped = types.escape_zig_keyword(oneof.name);
     try e.print("if (self.{f}) |oneof_val| switch (oneof_val)", .{escaped});
@@ -1611,7 +2068,7 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
     try e.open_brace();
     try e.print("var scanner = {s}.JsonScanner.init(allocator, json_bytes);\n", .{json_mod});
     try e.print("defer scanner.deinit();\n", .{});
-    try e.print("return try from_json_scanner(allocator, &scanner);\n", .{});
+    try e.print("return try @This().from_json_scanner(allocator, &scanner);\n", .{});
     try e.close_brace_nosemi();
 
     try e.blank_line();
@@ -1664,6 +2121,9 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
                 for (o.fields) |f| {
                     try emit_from_json_oneof_field_branch(e, f, o, &first_branch);
                 }
+            },
+            .group => |g| {
+                try emit_from_json_group_branch(e, g, &first_branch);
             },
         }
     }
@@ -1880,6 +2340,51 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     try e.print("}}", .{});
 }
 
+fn emit_from_json_group_branch(e: *Emitter, grp: ast.Group, first_branch: *bool) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+    var json_name_buf: [256]u8 = undefined;
+    const jname = types.snake_to_lower_camel(field_name, &json_name_buf);
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, key, \"{s}\")", .{jname});
+    if (!std.mem.eql(u8, jname, field_name)) {
+        try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{field_name});
+    }
+    try e.print_raw(")", .{});
+    try e.open_brace();
+
+    switch (grp.label) {
+        .optional, .implicit, .required => {
+            try e.print("result.{f} = try {s}.from_json_scanner(allocator, scanner);\n", .{ escaped, grp.name });
+        },
+        .repeated => {
+            try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+            try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
+            try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{grp.name});
+            try e.print("while (true)", .{});
+            try e.open_brace();
+            try e.print("if (try scanner.peek()) |p| {{\n", .{});
+            e.indent_level += 1;
+            try e.print("if (p == .array_end) {{ _ = try scanner.next(); break; }}\n", .{});
+            e.indent_level -= 1;
+            try e.print("}} else break;\n", .{});
+            try e.print("try list.append(allocator, try {s}.from_json_scanner(allocator, scanner));\n", .{grp.name});
+            try e.close_brace_nosemi();
+            try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+        },
+    }
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
 fn emit_from_json_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.Oneof, first_branch: *bool) !void {
     const field_escaped = types.escape_zig_keyword(field.name);
     const oneof_escaped = types.escape_zig_keyword(oneof.name);
@@ -1929,10 +2434,11 @@ const FieldItem = union(enum) {
     field: ast.Field,
     map: ast.MapField,
     oneof: ast.Oneof,
+    group: ast.Group,
 };
 
 fn collect_all_fields(allocator: std.mem.Allocator, msg: ast.Message) ![]FieldItem {
-    const total = msg.fields.len + msg.maps.len + msg.oneofs.len;
+    const total = msg.fields.len + msg.maps.len + msg.oneofs.len + msg.groups.len;
     var items = try allocator.alloc(FieldItem, total);
     var idx: usize = 0;
     for (msg.fields) |f| {
@@ -1945,6 +2451,10 @@ fn collect_all_fields(allocator: std.mem.Allocator, msg: ast.Message) ![]FieldIt
     }
     for (msg.oneofs) |o| {
         items[idx] = .{ .oneof = o };
+        idx += 1;
+    }
+    for (msg.groups) |g| {
+        items[idx] = .{ .group = g };
         idx += 1;
     }
     // Sort by field number
@@ -1961,6 +2471,7 @@ fn field_item_number(item: FieldItem) i32 {
         .field => |f| f.number,
         .map => |m| m.number,
         .oneof => |o| if (o.fields.len > 0) o.fields[0].number else 0,
+        .group => |g| g.number,
     };
 }
 

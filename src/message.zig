@@ -161,6 +161,16 @@ pub const MessageWriter = struct {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .len });
         try encoding.encode_varint(self.writer, @intCast(data_len));
     }
+
+    /// Write a start-group tag for a group field.
+    pub fn write_sgroup_field(self: MessageWriter, field_number: u29) std.Io.Writer.Error!void {
+        try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .sgroup });
+    }
+
+    /// Write an end-group tag for a group field.
+    pub fn write_egroup_field(self: MessageWriter, field_number: u29) std.Io.Writer.Error!void {
+        try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .egroup });
+    }
 };
 
 // ── Packed Iterators ──────────────────────────────────────────────────
@@ -223,6 +233,14 @@ pub fn i64_field_size(field_number: u29) usize {
 
 pub fn len_field_size(field_number: u29, data_len: usize) usize {
     return @as(usize, encoding.tag_size(field_number)) + @as(usize, encoding.varint_size(@intCast(data_len))) + data_len;
+}
+
+pub fn sgroup_tag_size(field_number: u29) usize {
+    return @as(usize, encoding.tag_size(field_number));
+}
+
+pub fn egroup_tag_size(field_number: u29) usize {
+    return @as(usize, encoding.tag_size(field_number));
 }
 
 // ══════════════════════════════════════════════════════════════════════

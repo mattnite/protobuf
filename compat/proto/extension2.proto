@@ -1,0 +1,14 @@
+syntax = "proto2";
+
+
+message ExtBase {
+    required int32 id = 1;
+    optional string name = 2;
+    extensions 100 to 199;
+}
+
+extend ExtBase {
+    optional int32 ext_value = 100;
+    optional string ext_label = 101;
+    optional bool ext_flag = 102;
+}
