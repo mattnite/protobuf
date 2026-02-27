@@ -20,6 +20,8 @@ func main() {
 	failures += validateFile(zigDir, "nested3", validateNested3)
 	failures += validateFile(zigDir, "enum3", validateEnum3)
 	failures += validateFile(zigDir, "oneof3", validateOneof3)
+	failures += validateFile(zigDir, "repeated3", validateRepeated3)
+	failures += validateFile(zigDir, "map3", validateMap3)
 	failures += validateFile(zigDir, "optional3", validateOptional3)
 	failures += validateFile(zigDir, "edge3", validateEdge3)
 	failures += validateFile(zigDir, "scalar2", validateScalar2)
@@ -313,6 +315,135 @@ func validateScalar2(cases []testcases.RawTestCase) int {
 			failures += check(tc.Name, "f_bool", msg.FBool != nil && *msg.FBool == true)
 			failures += check(tc.Name, "f_string", msg.FString != nil && *msg.FString == "hello")
 			failures += check(tc.Name, "f_bytes", string(msg.FBytes) == "world")
+		}
+	}
+	return failures
+}
+
+func validateRepeated3(cases []testcases.RawTestCase) int {
+	failures := 0
+	for _, tc := range cases {
+		msg := &pb.RepeatedMessage{}
+		if err := proto.Unmarshal(tc.Data, msg); err != nil {
+			fmt.Printf("  FAIL %s: unmarshal: %v\n", tc.Name, err)
+			failures++
+			continue
+		}
+
+		switch tc.Name {
+		case "empty":
+			failures += check(tc.Name, "ints.len", len(msg.Ints) == 0)
+			failures += check(tc.Name, "strings.len", len(msg.Strings) == 0)
+			failures += check(tc.Name, "doubles.len", len(msg.Doubles) == 0)
+			failures += check(tc.Name, "bools.len", len(msg.Bools) == 0)
+			failures += check(tc.Name, "byte_slices.len", len(msg.ByteSlices) == 0)
+			failures += check(tc.Name, "items.len", len(msg.Items) == 0)
+		case "single":
+			failures += check(tc.Name, "ints.len", len(msg.Ints) == 1)
+			if len(msg.Ints) == 1 {
+				failures += check(tc.Name, "ints[0]", msg.Ints[0] == 1)
+			}
+			failures += check(tc.Name, "strings.len", len(msg.Strings) == 1)
+			if len(msg.Strings) == 1 {
+				failures += check(tc.Name, "strings[0]", msg.Strings[0] == "hello")
+			}
+			failures += check(tc.Name, "doubles.len", len(msg.Doubles) == 1)
+			if len(msg.Doubles) == 1 {
+				failures += check(tc.Name, "doubles[0]", msg.Doubles[0] == 1.5)
+			}
+			failures += check(tc.Name, "bools.len", len(msg.Bools) == 1)
+			if len(msg.Bools) == 1 {
+				failures += check(tc.Name, "bools[0]", msg.Bools[0] == true)
+			}
+			failures += check(tc.Name, "byte_slices.len", len(msg.ByteSlices) == 1)
+			if len(msg.ByteSlices) == 1 {
+				failures += check(tc.Name, "byte_slices[0]", len(msg.ByteSlices[0]) == 1 && msg.ByteSlices[0][0] == 0x01)
+			}
+			failures += check(tc.Name, "items.len", len(msg.Items) == 1)
+			if len(msg.Items) == 1 {
+				failures += check(tc.Name, "items[0].id", msg.Items[0].Id == 1)
+				failures += check(tc.Name, "items[0].name", msg.Items[0].Name == "first")
+			}
+		case "multiple":
+			failures += check(tc.Name, "ints.len", len(msg.Ints) == 3)
+			if len(msg.Ints) == 3 {
+				failures += check(tc.Name, "ints[0]", msg.Ints[0] == 1)
+				failures += check(tc.Name, "ints[1]", msg.Ints[1] == 2)
+				failures += check(tc.Name, "ints[2]", msg.Ints[2] == 3)
+			}
+			failures += check(tc.Name, "strings.len", len(msg.Strings) == 3)
+			if len(msg.Strings) == 3 {
+				failures += check(tc.Name, "strings[0]", msg.Strings[0] == "a")
+				failures += check(tc.Name, "strings[1]", msg.Strings[1] == "b")
+				failures += check(tc.Name, "strings[2]", msg.Strings[2] == "c")
+			}
+			failures += check(tc.Name, "doubles.len", len(msg.Doubles) == 3)
+			failures += check(tc.Name, "bools.len", len(msg.Bools) == 3)
+			if len(msg.Bools) == 3 {
+				failures += check(tc.Name, "bools[0]", msg.Bools[0] == true)
+				failures += check(tc.Name, "bools[1]", msg.Bools[1] == false)
+				failures += check(tc.Name, "bools[2]", msg.Bools[2] == true)
+			}
+			failures += check(tc.Name, "byte_slices.len", len(msg.ByteSlices) == 2)
+			failures += check(tc.Name, "items.len", len(msg.Items) == 2)
+			if len(msg.Items) == 2 {
+				failures += check(tc.Name, "items[0].id", msg.Items[0].Id == 1)
+				failures += check(tc.Name, "items[0].name", msg.Items[0].Name == "one")
+				failures += check(tc.Name, "items[1].id", msg.Items[1].Id == 2)
+				failures += check(tc.Name, "items[1].name", msg.Items[1].Name == "two")
+			}
+		}
+	}
+	return failures
+}
+
+func validateMap3(cases []testcases.RawTestCase) int {
+	failures := 0
+	for _, tc := range cases {
+		msg := &pb.MapMessage{}
+		if err := proto.Unmarshal(tc.Data, msg); err != nil {
+			fmt.Printf("  FAIL %s: unmarshal: %v\n", tc.Name, err)
+			failures++
+			continue
+		}
+
+		switch tc.Name {
+		case "empty":
+			failures += check(tc.Name, "str_str.len", len(msg.StrStr) == 0)
+			failures += check(tc.Name, "int_str.len", len(msg.IntStr) == 0)
+			failures += check(tc.Name, "str_msg.len", len(msg.StrMsg) == 0)
+		case "single":
+			failures += check(tc.Name, "str_str.len", len(msg.StrStr) == 1)
+			failures += check(tc.Name, "str_str[key]", msg.StrStr["key"] == "val")
+			failures += check(tc.Name, "int_str.len", len(msg.IntStr) == 1)
+			failures += check(tc.Name, "int_str[1]", msg.IntStr[1] == "one")
+			failures += check(tc.Name, "str_msg.len", len(msg.StrMsg) == 1)
+			if sub, ok := msg.StrMsg["a"]; ok {
+				failures += check(tc.Name, "str_msg[a].id", sub.Id == 1)
+				failures += check(tc.Name, "str_msg[a].text", sub.Text == "alpha")
+			} else {
+				failures += check(tc.Name, "str_msg[a]", false)
+			}
+		case "multiple":
+			failures += check(tc.Name, "str_str.len", len(msg.StrStr) == 2)
+			failures += check(tc.Name, "str_str[a]", msg.StrStr["a"] == "1")
+			failures += check(tc.Name, "str_str[b]", msg.StrStr["b"] == "2")
+			failures += check(tc.Name, "int_str.len", len(msg.IntStr) == 2)
+			failures += check(tc.Name, "int_str[1]", msg.IntStr[1] == "one")
+			failures += check(tc.Name, "int_str[2]", msg.IntStr[2] == "two")
+			failures += check(tc.Name, "str_msg.len", len(msg.StrMsg) == 2)
+			if sub, ok := msg.StrMsg["x"]; ok {
+				failures += check(tc.Name, "str_msg[x].id", sub.Id == 10)
+				failures += check(tc.Name, "str_msg[x].text", sub.Text == "x")
+			} else {
+				failures += check(tc.Name, "str_msg[x]", false)
+			}
+			if sub, ok := msg.StrMsg["y"]; ok {
+				failures += check(tc.Name, "str_msg[y].id", sub.Id == 20)
+				failures += check(tc.Name, "str_msg[y].text", sub.Text == "y")
+			} else {
+				failures += check(tc.Name, "str_msg[y]", false)
+			}
 		}
 	}
 	return failures

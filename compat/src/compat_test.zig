@@ -536,6 +536,373 @@ test "oneof3: write Zig test vectors" {
     try write_test_vectors(OneofMessage, &cases, "testdata/zig/oneof3.bin");
 }
 
+// ── Repeated3 Tests ───────────────────────────────────────────────────
+
+test "repeated3: encode/decode round-trip - empty" {
+    const msg = RepeatedMessage{};
+    const data = try encode_to_buf(RepeatedMessage, msg);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(usize, 0), data.len);
+
+    var decoded = try decode_msg(RepeatedMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), decoded.ints.len);
+    try testing.expectEqual(@as(usize, 0), decoded.strings.len);
+    try testing.expectEqual(@as(usize, 0), decoded.doubles.len);
+    try testing.expectEqual(@as(usize, 0), decoded.bools.len);
+    try testing.expectEqual(@as(usize, 0), decoded.byte_slices.len);
+    try testing.expectEqual(@as(usize, 0), decoded.items.len);
+}
+
+test "repeated3: encode/decode round-trip - single" {
+    const items = &[_]RepItem{.{ .id = 1, .name = "first" }};
+    const msg = RepeatedMessage{
+        .ints = &.{1},
+        .strings = &.{"hello"},
+        .doubles = &.{1.5},
+        .bools = &.{true},
+        .byte_slices = &.{"\x01"},
+        .items = items,
+    };
+
+    const data = try encode_to_buf(RepeatedMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(RepeatedMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), decoded.ints.len);
+    try testing.expectEqual(@as(i32, 1), decoded.ints[0]);
+    try testing.expectEqual(@as(usize, 1), decoded.strings.len);
+    try testing.expectEqualStrings("hello", decoded.strings[0]);
+    try testing.expectEqual(@as(usize, 1), decoded.doubles.len);
+    try testing.expectEqual(@as(f64, 1.5), decoded.doubles[0]);
+    try testing.expectEqual(@as(usize, 1), decoded.bools.len);
+    try testing.expectEqual(true, decoded.bools[0]);
+    try testing.expectEqual(@as(usize, 1), decoded.byte_slices.len);
+    try testing.expectEqualSlices(u8, "\x01", decoded.byte_slices[0]);
+    try testing.expectEqual(@as(usize, 1), decoded.items.len);
+    try testing.expectEqual(@as(i32, 1), decoded.items[0].id);
+    try testing.expectEqualStrings("first", decoded.items[0].name);
+}
+
+test "repeated3: encode/decode round-trip - multiple" {
+    const items = &[_]RepItem{
+        .{ .id = 1, .name = "one" },
+        .{ .id = 2, .name = "two" },
+    };
+    const msg = RepeatedMessage{
+        .ints = &.{ 1, 2, 3 },
+        .strings = &.{ "a", "b", "c" },
+        .doubles = &.{ 1.1, 2.2, 3.3 },
+        .bools = &.{ true, false, true },
+        .byte_slices = &.{ "\x01", "\x02" },
+        .items = items,
+    };
+
+    const data = try encode_to_buf(RepeatedMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(RepeatedMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), decoded.ints.len);
+    try testing.expectEqual(@as(i32, 1), decoded.ints[0]);
+    try testing.expectEqual(@as(i32, 2), decoded.ints[1]);
+    try testing.expectEqual(@as(i32, 3), decoded.ints[2]);
+    try testing.expectEqual(@as(usize, 3), decoded.strings.len);
+    try testing.expectEqualStrings("a", decoded.strings[0]);
+    try testing.expectEqualStrings("b", decoded.strings[1]);
+    try testing.expectEqualStrings("c", decoded.strings[2]);
+    try testing.expectEqual(@as(usize, 3), decoded.doubles.len);
+    try testing.expectEqual(@as(usize, 3), decoded.bools.len);
+    try testing.expectEqual(true, decoded.bools[0]);
+    try testing.expectEqual(false, decoded.bools[1]);
+    try testing.expectEqual(true, decoded.bools[2]);
+    try testing.expectEqual(@as(usize, 2), decoded.byte_slices.len);
+    try testing.expectEqual(@as(usize, 2), decoded.items.len);
+    try testing.expectEqual(@as(i32, 1), decoded.items[0].id);
+    try testing.expectEqualStrings("one", decoded.items[0].name);
+    try testing.expectEqual(@as(i32, 2), decoded.items[1].id);
+    try testing.expectEqualStrings("two", decoded.items[1].name);
+}
+
+test "repeated3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/repeated3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try RepeatedMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "empty")) {
+            try testing.expectEqual(@as(usize, 0), decoded.ints.len);
+            try testing.expectEqual(@as(usize, 0), decoded.strings.len);
+            try testing.expectEqual(@as(usize, 0), decoded.items.len);
+        } else if (std.mem.eql(u8, tc.name, "single")) {
+            try testing.expectEqual(@as(usize, 1), decoded.ints.len);
+            try testing.expectEqual(@as(i32, 1), decoded.ints[0]);
+            try testing.expectEqual(@as(usize, 1), decoded.strings.len);
+            try testing.expectEqualStrings("hello", decoded.strings[0]);
+            try testing.expectEqual(@as(usize, 1), decoded.doubles.len);
+            try testing.expectEqual(@as(f64, 1.5), decoded.doubles[0]);
+            try testing.expectEqual(@as(usize, 1), decoded.bools.len);
+            try testing.expectEqual(true, decoded.bools[0]);
+            try testing.expectEqual(@as(usize, 1), decoded.byte_slices.len);
+            try testing.expectEqualSlices(u8, "\x01", decoded.byte_slices[0]);
+            try testing.expectEqual(@as(usize, 1), decoded.items.len);
+            try testing.expectEqual(@as(i32, 1), decoded.items[0].id);
+            try testing.expectEqualStrings("first", decoded.items[0].name);
+        } else if (std.mem.eql(u8, tc.name, "multiple")) {
+            try testing.expectEqual(@as(usize, 3), decoded.ints.len);
+            try testing.expectEqual(@as(usize, 3), decoded.strings.len);
+            try testing.expectEqual(@as(usize, 2), decoded.items.len);
+        }
+    }
+}
+
+test "repeated3: write Zig test vectors" {
+    const single_items = &[_]RepItem{.{ .id = 1, .name = "first" }};
+    const multi_items = &[_]RepItem{
+        .{ .id = 1, .name = "one" },
+        .{ .id = 2, .name = "two" },
+    };
+    const cases = [_]struct { name: []const u8, msg: RepeatedMessage }{
+        .{ .name = "empty", .msg = .{} },
+        .{ .name = "single", .msg = .{
+            .ints = &.{1},
+            .strings = &.{"hello"},
+            .doubles = &.{1.5},
+            .bools = &.{true},
+            .byte_slices = &.{"\x01"},
+            .items = single_items,
+        } },
+        .{ .name = "multiple", .msg = .{
+            .ints = &.{ 1, 2, 3 },
+            .strings = &.{ "a", "b", "c" },
+            .doubles = &.{ 1.1, 2.2, 3.3 },
+            .bools = &.{ true, false, true },
+            .byte_slices = &.{ "\x01", "\x02" },
+            .items = multi_items,
+        } },
+    };
+
+    try write_test_vectors(RepeatedMessage, &cases, "testdata/zig/repeated3.bin");
+}
+
+// ── Map3 Tests ────────────────────────────────────────────────────────
+
+test "map3: encode/decode round-trip - empty" {
+    const msg = MapMessage{};
+    const data = try encode_to_buf(MapMessage, msg);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(usize, 0), data.len);
+
+    var decoded = try decode_msg(MapMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), decoded.str_str.count());
+    try testing.expectEqual(@as(usize, 0), decoded.int_str.count());
+    try testing.expectEqual(@as(usize, 0), decoded.str_msg.count());
+}
+
+test "map3: encode/decode round-trip - single" {
+    var str_str: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    defer str_str.deinit(testing.allocator);
+    try str_str.put(testing.allocator, "key", "val");
+
+    var int_str: std.AutoArrayHashMapUnmanaged(i32, []const u8) = .empty;
+    defer int_str.deinit(testing.allocator);
+    try int_str.put(testing.allocator, 1, "one");
+
+    var str_msg: std.StringArrayHashMapUnmanaged(MapSubMsg) = .empty;
+    defer str_msg.deinit(testing.allocator);
+    try str_msg.put(testing.allocator, "a", .{ .id = 1, .text = "alpha" });
+
+    const msg = MapMessage{
+        .str_str = str_str,
+        .int_str = int_str,
+        .str_msg = str_msg,
+    };
+
+    const data = try encode_to_buf(MapMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(MapMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), decoded.str_str.count());
+    try testing.expectEqualStrings("val", decoded.str_str.get("key").?);
+    try testing.expectEqual(@as(usize, 1), decoded.int_str.count());
+    try testing.expectEqualStrings("one", decoded.int_str.get(1).?);
+    try testing.expectEqual(@as(usize, 1), decoded.str_msg.count());
+    const sub = decoded.str_msg.get("a").?;
+    try testing.expectEqual(@as(i32, 1), sub.id);
+    try testing.expectEqualStrings("alpha", sub.text);
+}
+
+test "map3: encode/decode round-trip - multiple" {
+    var str_str: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+    defer str_str.deinit(testing.allocator);
+    try str_str.put(testing.allocator, "a", "1");
+    try str_str.put(testing.allocator, "b", "2");
+
+    var int_str: std.AutoArrayHashMapUnmanaged(i32, []const u8) = .empty;
+    defer int_str.deinit(testing.allocator);
+    try int_str.put(testing.allocator, 1, "one");
+    try int_str.put(testing.allocator, 2, "two");
+
+    var str_msg: std.StringArrayHashMapUnmanaged(MapSubMsg) = .empty;
+    defer str_msg.deinit(testing.allocator);
+    try str_msg.put(testing.allocator, "x", .{ .id = 10, .text = "x" });
+    try str_msg.put(testing.allocator, "y", .{ .id = 20, .text = "y" });
+
+    const msg = MapMessage{
+        .str_str = str_str,
+        .int_str = int_str,
+        .str_msg = str_msg,
+    };
+
+    const data = try encode_to_buf(MapMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(MapMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), decoded.str_str.count());
+    try testing.expectEqualStrings("1", decoded.str_str.get("a").?);
+    try testing.expectEqualStrings("2", decoded.str_str.get("b").?);
+    try testing.expectEqual(@as(usize, 2), decoded.int_str.count());
+    try testing.expectEqualStrings("one", decoded.int_str.get(1).?);
+    try testing.expectEqualStrings("two", decoded.int_str.get(2).?);
+    try testing.expectEqual(@as(usize, 2), decoded.str_msg.count());
+    const sub_x = decoded.str_msg.get("x").?;
+    try testing.expectEqual(@as(i32, 10), sub_x.id);
+    try testing.expectEqualStrings("x", sub_x.text);
+    const sub_y = decoded.str_msg.get("y").?;
+    try testing.expectEqual(@as(i32, 20), sub_y.id);
+    try testing.expectEqualStrings("y", sub_y.text);
+}
+
+test "map3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/map3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try MapMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "empty")) {
+            try testing.expectEqual(@as(usize, 0), decoded.str_str.count());
+            try testing.expectEqual(@as(usize, 0), decoded.int_str.count());
+            try testing.expectEqual(@as(usize, 0), decoded.str_msg.count());
+        } else if (std.mem.eql(u8, tc.name, "single")) {
+            try testing.expectEqual(@as(usize, 1), decoded.str_str.count());
+            try testing.expectEqualStrings("val", decoded.str_str.get("key").?);
+            try testing.expectEqual(@as(usize, 1), decoded.int_str.count());
+            try testing.expectEqualStrings("one", decoded.int_str.get(1).?);
+            try testing.expectEqual(@as(usize, 1), decoded.str_msg.count());
+            const sub = decoded.str_msg.get("a").?;
+            try testing.expectEqual(@as(i32, 1), sub.id);
+            try testing.expectEqualStrings("alpha", sub.text);
+        } else if (std.mem.eql(u8, tc.name, "multiple")) {
+            try testing.expectEqual(@as(usize, 2), decoded.str_str.count());
+            try testing.expectEqualStrings("1", decoded.str_str.get("a").?);
+            try testing.expectEqualStrings("2", decoded.str_str.get("b").?);
+            try testing.expectEqual(@as(usize, 2), decoded.int_str.count());
+            try testing.expectEqualStrings("one", decoded.int_str.get(1).?);
+            try testing.expectEqualStrings("two", decoded.int_str.get(2).?);
+            try testing.expectEqual(@as(usize, 2), decoded.str_msg.count());
+            const sub_x = decoded.str_msg.get("x").?;
+            try testing.expectEqual(@as(i32, 10), sub_x.id);
+            const sub_y = decoded.str_msg.get("y").?;
+            try testing.expectEqual(@as(i32, 20), sub_y.id);
+        }
+    }
+}
+
+test "map3: write Zig test vectors" {
+    // We can't use struct literal initialization for maps with putAssumeCapacity
+    // since the maps need runtime capacity. Instead, encode manually.
+    // For the write_test_vectors helper, we need to build messages with maps.
+    // Since maps are non-owning and default empty, we use the encode path directly.
+    if (std.fs.path.dirname("testdata/zig/map3.bin")) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
+    var file = try std.fs.cwd().createFile("testdata/zig/map3.bin", .{});
+    defer file.close();
+
+    var buf: [65536]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+
+    // empty
+    {
+        const msg = MapMessage{};
+        var msg_buf: [8192]u8 = undefined;
+        var msg_w: std.Io.Writer = .fixed(&msg_buf);
+        try msg.encode(&msg_w);
+        try framing.write_test_case(&w, "empty", msg_w.buffered());
+    }
+
+    // single
+    {
+        var str_str: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+        defer str_str.deinit(testing.allocator);
+        try str_str.put(testing.allocator, "key", "val");
+        var int_str: std.AutoArrayHashMapUnmanaged(i32, []const u8) = .empty;
+        defer int_str.deinit(testing.allocator);
+        try int_str.put(testing.allocator, 1, "one");
+        var str_msg: std.StringArrayHashMapUnmanaged(MapSubMsg) = .empty;
+        defer str_msg.deinit(testing.allocator);
+        try str_msg.put(testing.allocator, "a", .{ .id = 1, .text = "alpha" });
+        const msg = MapMessage{
+            .str_str = str_str,
+            .int_str = int_str,
+            .str_msg = str_msg,
+        };
+        var msg_buf: [8192]u8 = undefined;
+        var msg_w: std.Io.Writer = .fixed(&msg_buf);
+        try msg.encode(&msg_w);
+        try framing.write_test_case(&w, "single", msg_w.buffered());
+    }
+
+    // multiple
+    {
+        var str_str: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+        defer str_str.deinit(testing.allocator);
+        try str_str.put(testing.allocator, "a", "1");
+        try str_str.put(testing.allocator, "b", "2");
+        var int_str: std.AutoArrayHashMapUnmanaged(i32, []const u8) = .empty;
+        defer int_str.deinit(testing.allocator);
+        try int_str.put(testing.allocator, 1, "one");
+        try int_str.put(testing.allocator, 2, "two");
+        var str_msg: std.StringArrayHashMapUnmanaged(MapSubMsg) = .empty;
+        defer str_msg.deinit(testing.allocator);
+        try str_msg.put(testing.allocator, "x", .{ .id = 10, .text = "x" });
+        try str_msg.put(testing.allocator, "y", .{ .id = 20, .text = "y" });
+        const msg = MapMessage{
+            .str_str = str_str,
+            .int_str = int_str,
+            .str_msg = str_msg,
+        };
+        var msg_buf: [8192]u8 = undefined;
+        var msg_w: std.Io.Writer = .fixed(&msg_buf);
+        try msg.encode(&msg_w);
+        try framing.write_test_case(&w, "multiple", msg_w.buffered());
+    }
+
+    try file.writeAll(w.buffered());
+}
+
 // ── Optional3 Tests ───────────────────────────────────────────────────
 
 test "optional3: encode/decode round-trip - all unset" {
