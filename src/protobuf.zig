@@ -7,6 +7,7 @@ pub const json = @import("json.zig");
 pub const text_format = @import("text_format.zig");
 pub const descriptor = @import("descriptor.zig");
 pub const dynamic = @import("dynamic.zig");
+pub const plugin = @import("plugin.zig");
 
 test {
     _ = encoding;
@@ -18,4 +19,5 @@ test {
     _ = text_format;
     _ = descriptor;
     _ = dynamic;
+    _ = plugin;
 }

@@ -10,11 +10,25 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    _ = b.addModule("protobuf", .{
+    const protobuf_mod = b.addModule("protobuf", .{
         .root_source_file = b.path("src/protobuf.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // protoc-gen-zig executable
+    const protoc_gen_zig = b.addExecutable(.{
+        .name = "protoc-gen-zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/protoc_gen_zig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "protobuf", .module = protobuf_mod },
+            },
+        }),
+    });
+    b.installArtifact(protoc_gen_zig);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -26,6 +40,26 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // protoc plugin integration tests
+    const protoc_test_options = b.addOptions();
+    protoc_test_options.addOptionPath("plugin_path", protoc_gen_zig.getEmittedBin());
+    protoc_test_options.addOptionPath("proto_dir", b.path("compat/proto"));
+
+    const protoc_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/protoc_plugin_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "protobuf", .module = protobuf_mod },
+                .{ .name = "build_options", .module = protoc_test_options.createModule() },
+            },
+        }),
+    });
+
+    const protoc_test_step = b.step("protoc-test", "Run protoc plugin integration tests");
+    protoc_test_step.dependOn(&b.addRunArtifact(protoc_tests).step);
 }
 
 /// Create a GenerateStep that compiles .proto files into importable Zig modules.
