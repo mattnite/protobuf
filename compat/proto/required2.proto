@@ -1,0 +1,9 @@
+syntax = "proto2";
+
+
+message Required2Message {
+    required int32 req_id = 1;
+    required string req_name = 2;
+    optional int32 opt_value = 3;
+    optional string opt_label = 4;
+}

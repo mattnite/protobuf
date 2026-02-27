@@ -1,0 +1,12 @@
+.{
+    .name = .protobuf_compat,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.15.2",
+    .paths = .{""},
+    .fingerprint = 0x98632e2d69347aa9,
+    .dependencies = .{
+        .protobuf = .{
+            .path = "..",
+        },
+    },
+}

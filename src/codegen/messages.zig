@@ -95,12 +95,7 @@ fn emit_field(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
             }
         },
         .named => |name| {
-            // Could be enum or message. Messages are always optional.
-            // Enums: proto3 implicit = E = .FIRST, proto3 optional = ?E = null
-            // For named types, we don't know if it's enum or message from AST alone.
-            // Convention: we generate as if message (always ?T = null) for non-repeated.
-            // The file-level generator will know the actual type from the linker.
-            // For now, generate conservatively:
+            // Message type: always optional for implicit/optional labels.
             switch (field.label) {
                 .repeated => {
                     try e.print("{f}: []const {s} = &.{{}},\n", .{ escaped, name });
@@ -112,9 +107,24 @@ fn emit_field(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                     try e.print("{f}: {s} = undefined,\n", .{ escaped, name });
                 },
                 .implicit => {
-                    // Proto3 implicit for named type: could be message (?T) or enum (E)
-                    // Default to ?T (message) - the codegen caller can differentiate
                     try e.print("{f}: ?{s} = null,\n", .{ escaped, name });
+                },
+            }
+        },
+        .enum_ref => |name| {
+            // Enum type: value type (not optional) for implicit/required.
+            switch (field.label) {
+                .repeated => {
+                    try e.print("{f}: []const {s} = &.{{}},\n", .{ escaped, name });
+                },
+                .optional => {
+                    try e.print("{f}: ?{s} = null,\n", .{ escaped, name });
+                },
+                .required => {
+                    try e.print("{f}: {s} = @enumFromInt(0),\n", .{ escaped, name });
+                },
+                .implicit => {
+                    try e.print("{f}: {s} = @enumFromInt(0),\n", .{ escaped, name });
                 },
             }
         },
@@ -128,6 +138,7 @@ fn emit_map_field(e: *Emitter, map_field: ast.MapField) !void {
         const value_type = switch (map_field.value_type) {
             .scalar => |s| types.scalar_zig_type(s),
             .named => |n| n,
+            .enum_ref => |n| n,
         };
         try e.print("{f}: std.StringArrayHashMapUnmanaged({s}) = .empty,\n", .{ escaped, value_type });
     } else {
@@ -136,6 +147,7 @@ fn emit_map_field(e: *Emitter, map_field: ast.MapField) !void {
         const value_type = switch (map_field.value_type) {
             .scalar => |s| types.scalar_zig_type(s),
             .named => |n| n,
+            .enum_ref => |n| n,
         };
         try e.print("{f}: std.AutoArrayHashMapUnmanaged({s}, {s}) = .empty,\n", .{ escaped, key_type, value_type });
     }
@@ -155,6 +167,9 @@ fn emit_oneof_type(e: *Emitter, oneof: ast.Oneof, syntax: ast.Syntax) !void {
             .named => |name| {
                 try e.print("{f}: {s},\n", .{ escaped, name });
                 _ = syntax;
+            },
+            .enum_ref => |name| {
+                try e.print("{f}: {s},\n", .{ escaped, name });
             },
         }
     }
@@ -249,7 +264,7 @@ fn emit_encode_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try e.print("for (self.{f}) |item|", .{escaped});
                     try e.open_brace();
                     try e.print("const sub_size = item.calc_size();\n", .{});
-                    try e.print("try mw.write_len_field({d}, sub_size);\n", .{num});
+                    try e.print("try mw.write_len_prefix({d}, sub_size);\n", .{num});
                     try e.print("try item.encode(writer);\n", .{});
                     try e.close_brace_nosemi();
                 },
@@ -257,7 +272,7 @@ fn emit_encode_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try e.print("if (self.{f}) |sub|", .{escaped});
                     try e.open_brace();
                     try e.print("const sub_size = sub.calc_size();\n", .{});
-                    try e.print("try mw.write_len_field({d}, sub_size);\n", .{num});
+                    try e.print("try mw.write_len_prefix({d}, sub_size);\n", .{num});
                     try e.print("try sub.encode(writer);\n", .{});
                     try e.close_brace_nosemi();
                 },
@@ -265,10 +280,27 @@ fn emit_encode_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try e.print("{{\n", .{});
                     e.indent_level += 1;
                     try e.print("const sub_size = self.{f}.calc_size();\n", .{escaped});
-                    try e.print("try mw.write_len_field({d}, sub_size);\n", .{num});
+                    try e.print("try mw.write_len_prefix({d}, sub_size);\n", .{num});
                     try e.print("try self.{f}.encode(writer);\n", .{escaped});
                     e.indent_level -= 1;
                     try e.print("}}\n", .{});
+                },
+            }
+        },
+        .enum_ref => |_| {
+            // Enums use varint wire type (same as int32)
+            switch (field.label) {
+                .implicit => {
+                    try e.print("if (@intFromEnum(self.{f}) != 0) try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(self.{f})))));\n", .{ escaped, num, escaped });
+                },
+                .optional => {
+                    try e.print("if (self.{f}) |v| try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(v)))));\n", .{ escaped, num });
+                },
+                .required => {
+                    try e.print("try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(self.{f})))));\n", .{ num, escaped });
+                },
+                .repeated => {
+                    try e.print("for (self.{f}) |item| try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{ escaped, num });
                 },
             }
         },
@@ -335,19 +367,35 @@ fn emit_encode_scalar_self(e: *Emitter, escaped: types.EscapedName, s: ast.Scala
 }
 
 fn scalar_value_conversion(s: ast.ScalarType, val: []const u8) []const u8 {
-    _ = val;
+    // When val is "v" (default), return the pre-built strings
+    if (std.mem.eql(u8, val, "v")) {
+        return switch (s) {
+            .string, .bytes => "v",
+            .bool => "@intFromBool(v)",
+            .double, .float => "@bitCast(v)",
+            .int32 => "@as(u64, @bitCast(@as(i64, v)))",
+            .int64 => "@as(u64, @bitCast(v))",
+            .uint32 => "@as(u64, v)",
+            .uint64 => "v",
+            .sint32 => "@as(u64, encoding.zigzag_encode(v))",
+            .sint64 => "encoding.zigzag_encode_64(v)",
+            .fixed32, .sfixed32 => "@bitCast(v)",
+            .fixed64, .sfixed64 => "@bitCast(v)",
+        };
+    }
+    // When val is "item" (repeated), return the item variants
     return switch (s) {
-        .string, .bytes => "v",
-        .bool => "@intFromBool(v)",
-        .double, .float => "@bitCast(v)",
-        .int32 => "@as(u64, @bitCast(@as(i64, v)))",
-        .int64 => "@as(u64, @bitCast(v))",
-        .uint32 => "@as(u64, v)",
-        .uint64 => "v",
-        .sint32 => "@as(u64, encoding.zigzag_encode(v))",
-        .sint64 => "encoding.zigzag_encode_64(v)",
-        .fixed32, .sfixed32 => "@bitCast(v)",
-        .fixed64, .sfixed64 => "@bitCast(v)",
+        .string, .bytes => "item",
+        .bool => "@intFromBool(item)",
+        .double, .float => "@bitCast(item)",
+        .int32 => "@as(u64, @bitCast(@as(i64, item)))",
+        .int64 => "@as(u64, @bitCast(item))",
+        .uint32 => "@as(u64, item)",
+        .uint64 => "item",
+        .sint32 => "@as(u64, encoding.zigzag_encode(item))",
+        .sint64 => "encoding.zigzag_encode_64(item)",
+        .fixed32, .sfixed32 => "@bitCast(item)",
+        .fixed64, .sfixed64 => "@bitCast(item)",
     };
 }
 
@@ -365,7 +413,7 @@ fn emit_encode_map(e: *Emitter, map_field: ast.MapField) !void {
     try e.print("var entry_size: usize = 0;\n", .{});
     try emit_map_entry_size_key(e, map_field.key_type);
     try emit_map_entry_size_value(e, map_field.value_type);
-    try e.print("try mw.write_len_field({d}, entry_size);\n", .{num});
+    try e.print("try mw.write_len_prefix({d}, entry_size);\n", .{num});
     try emit_map_entry_encode_key(e, map_field.key_type);
     try emit_map_entry_encode_value(e, map_field.value_type);
     try e.close_brace_nosemi();
@@ -394,6 +442,9 @@ fn emit_map_entry_size_value(e: *Emitter, value_type: ast.TypeRef) !void {
             try e.print("const val_size = val.calc_size();\n", .{});
             try e.print("entry_size += message.len_field_size(2, val_size);\n", .{});
         },
+        .enum_ref => {
+            try e.print("entry_size += message.varint_field_size(2, @as(u64, @bitCast(@as(i64, @intFromEnum(val)))));\n", .{});
+        },
     }
 }
 
@@ -417,8 +468,11 @@ fn emit_map_entry_encode_value(e: *Emitter, value_type: ast.TypeRef) !void {
             }
         },
         .named => {
-            try e.print("try mw.write_len_field(2, val_size);\n", .{});
+            try e.print("try mw.write_len_prefix(2, val_size);\n", .{});
             try e.print("try val.encode(writer);\n", .{});
+        },
+        .enum_ref => {
+            try e.print("try mw.write_varint_field(2, @as(u64, @bitCast(@as(i64, @intFromEnum(val)))));\n", .{});
         },
     }
 }
@@ -472,9 +526,12 @@ fn emit_encode_oneof(e: *Emitter, oneof: ast.Oneof) !void {
                 try e.print(".{f} => |sub|", .{field_escaped});
                 try e.open_brace();
                 try e.print("const sub_size = sub.calc_size();\n", .{});
-                try e.print("try mw.write_len_field({d}, sub_size);\n", .{num});
+                try e.print("try mw.write_len_prefix({d}, sub_size);\n", .{num});
                 try e.print("try sub.encode(writer);\n", .{});
-                try e.close_brace_nosemi();
+                try e.close_brace_comma();
+            },
+            .enum_ref => {
+                try e.print(".{f} => |v| try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(v))))),\n", .{ field_escaped, num });
             },
         }
     }
@@ -524,7 +581,16 @@ fn emit_size_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     }
                 },
                 .optional => {
-                    try e.print("if (self.{f}) |v| ", .{escaped});
+                    // For fixed-size types, the value isn't needed for size calc
+                    const needs_value = switch (s) {
+                        .double, .float, .fixed32, .sfixed32, .fixed64, .sfixed64 => false,
+                        else => true,
+                    };
+                    if (needs_value) {
+                        try e.print("if (self.{f}) |v| ", .{escaped});
+                    } else {
+                        try e.print("if (self.{f} != null) ", .{escaped});
+                    }
                     try emit_size_scalar_optional(e, s, size_fn, field.number);
                 },
                 .required => {
@@ -532,7 +598,15 @@ fn emit_size_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try emit_size_scalar_required(e, escaped, s, size_fn, field.number);
                 },
                 .repeated => {
-                    try e.print("for (self.{f}) |item| ", .{escaped});
+                    const needs_value = switch (s) {
+                        .double, .float, .fixed32, .sfixed32, .fixed64, .sfixed64 => false,
+                        else => true,
+                    };
+                    if (needs_value) {
+                        try e.print("for (self.{f}) |item| ", .{escaped});
+                    } else {
+                        try e.print("for (self.{f}) |_| ", .{escaped});
+                    }
                     try emit_size_scalar_repeated(e, s, size_fn, field.number);
                 },
             }
@@ -547,6 +621,22 @@ fn emit_size_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                 },
                 .required => {
                     try e.print("size += message.len_field_size({d}, self.{f}.calc_size());\n", .{ field.number, escaped });
+                },
+            }
+        },
+        .enum_ref => {
+            switch (field.label) {
+                .implicit => {
+                    try e.print("if (@intFromEnum(self.{f}) != 0) size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(self.{f})))));\n", .{ escaped, field.number, escaped });
+                },
+                .optional => {
+                    try e.print("if (self.{f}) |v| size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(v)))));\n", .{ escaped, field.number });
+                },
+                .required => {
+                    try e.print("size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(self.{f})))));\n", .{ field.number, escaped });
+                },
+                .repeated => {
+                    try e.print("for (self.{f}) |item| size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{ escaped, field.number });
                 },
             }
         },
@@ -667,6 +757,9 @@ fn emit_size_oneof(e: *Emitter, oneof: ast.Oneof) !void {
             .named => {
                 try e.print(".{f} => |sub| size += message.len_field_size({d}, sub.calc_size()),\n", .{ field_escaped, num });
             },
+            .enum_ref => {
+                try e.print(".{f} => |v| size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(v))))),\n", .{ field_escaped, num });
+            },
         }
     }
     try e.close_brace();
@@ -704,7 +797,7 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
     // else => unknown fields (skip for now)
     try e.print("else => {{}},\n", .{});
 
-    try e.close_brace(); // switch
+    try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi(); // fn
@@ -734,16 +827,54 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                     }
                 },
                 .repeated => {
-                    try e.print_raw("", .{});
-                    try e.open_brace();
-                    if (s == .string or s == .bytes) {
-                        try e.print("var list = std.ArrayList({s}).init(allocator);\n", .{types.scalar_zig_type(s)});
-                        try e.print("try list.append(try allocator.dupe(u8, field.value.len));\n", .{});
-                        try e.print("result.{f} = try list.toOwnedSlice();\n", .{escaped});
+                    if (types.is_packable_scalar(s)) {
+                        // Handle both packed (LEN) and individual element encoding
+                        try e.print_raw(" switch (field.value)", .{});
+                        try e.open_brace();
+                        // Packed encoding case
+                        try e.print(".len => |packed_data|", .{});
+                        try e.open_brace();
+                        try e.print("var count: usize = 0;\n", .{});
+                        try e.print("var count_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
+                        try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
+                        try e.print("const old = result.{f};\n", .{escaped});
+                        try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                        try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                        try e.print("var packed_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
+                        try e.print("var idx: usize = old.len;\n", .{});
+                        try e.print("while (try packed_iter.next()) |v| : (idx += 1) new[idx] = {s};\n", .{types.scalar_packed_decode_expr(s)});
+                        try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+                        try e.print("result.{f} = new;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}},\n", .{});
+                        // Individual element case
+                        try e.print("{s} =>", .{types.scalar_wire_variant(s)});
+                        try e.open_brace();
+                        try e.print("const old = result.{f};\n", .{escaped});
+                        try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
+                        try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                        try e.print("new[old.len] = {s};\n", .{types.scalar_decode_expr(s)});
+                        try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+                        try e.print("result.{f} = new;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}},\n", .{});
+                        try e.print("else => {{}},\n", .{});
+                        // Close switch
+                        e.indent_level -= 1;
+                        try e.print("}},\n", .{});
                     } else {
-                        try e.print("_ = @as(u8, 0); // TODO: repeated scalar accumulation\n", .{});
+                        // string/bytes: always LEN wire type, no packed encoding
+                        try e.print_raw("", .{});
+                        try e.open_brace();
+                        try e.print("const old = result.{f};\n", .{escaped});
+                        try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
+                        try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                        try e.print("new[old.len] = try allocator.dupe(u8, field.value.len);\n", .{});
+                        try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+                        try e.print("result.{f} = new;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}},\n", .{});
                     }
-                    try e.close_brace_nosemi();
                 },
             }
         },
@@ -758,8 +889,62 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                 .repeated => {
                     try e.print_raw("", .{});
                     try e.open_brace();
-                    try e.print("_ = @as(u8, 0); // TODO: repeated message accumulation\n", .{});
-                    try e.close_brace_nosemi();
+                    try e.print("const old = result.{f};\n", .{escaped});
+                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
+                    try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                    try e.print("new[old.len] = try @TypeOf(old[0]).decode(allocator, field.value.len);\n", .{});
+                    try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+                    try e.print("result.{f} = new;\n", .{escaped});
+                    e.indent_level -= 1;
+                    try e.print("}},\n", .{});
+                },
+            }
+        },
+        .enum_ref => {
+            const decode_expr = "@enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(field.value.varint)))))";
+            const packed_decode_expr = "@enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(v)))))";
+            switch (field.label) {
+                .implicit, .required => {
+                    try e.print_raw(" result.{f} = {s},\n", .{ escaped, decode_expr });
+                },
+                .optional => {
+                    try e.print_raw(" result.{f} = {s},\n", .{ escaped, decode_expr });
+                },
+                .repeated => {
+                    // Handle both packed (LEN) and individual varint encoding
+                    try e.print_raw(" switch (field.value)", .{});
+                    try e.open_brace();
+                    // Packed encoding case
+                    try e.print(".len => |packed_data|", .{});
+                    try e.open_brace();
+                    try e.print("var count: usize = 0;\n", .{});
+                    try e.print("var count_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
+                    try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
+                    try e.print("const old = result.{f};\n", .{escaped});
+                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + count);\n", .{});
+                    try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                    try e.print("var packed_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
+                    try e.print("var idx: usize = old.len;\n", .{});
+                    try e.print("while (try packed_iter.next()) |v| : (idx += 1) new[idx] = {s};\n", .{packed_decode_expr});
+                    try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+                    try e.print("result.{f} = new;\n", .{escaped});
+                    e.indent_level -= 1;
+                    try e.print("}},\n", .{});
+                    // Individual varint case
+                    try e.print(".varint =>", .{});
+                    try e.open_brace();
+                    try e.print("const old = result.{f};\n", .{escaped});
+                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
+                    try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                    try e.print("new[old.len] = {s};\n", .{decode_expr});
+                    try e.print("if (old.len > 0) allocator.free(old);\n", .{});
+                    try e.print("result.{f} = new;\n", .{escaped});
+                    e.indent_level -= 1;
+                    try e.print("}},\n", .{});
+                    try e.print("else => {{}},\n", .{});
+                    // Close switch
+                    e.indent_level -= 1;
+                    try e.print("}},\n", .{});
                 },
             }
         },
@@ -785,11 +970,12 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField) !void {
     try emit_decode_map_key_case(e, map_field.key_type);
     try emit_decode_map_value_case(e, map_field.value_type);
     try e.print("else => {{}},\n", .{});
-    try e.close_brace(); // switch
+    try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
 
-    try e.print("try self.{f}.put(allocator, entry_key, entry_val);\n", .{escaped});
-    try e.close_brace_nosemi();
+    try e.print("try result.{f}.put(allocator, entry_key, entry_val);\n", .{escaped});
+    e.indent_level -= 1;
+    try e.print("}},\n", .{});
 }
 
 fn emit_decode_map_key_decl(e: *Emitter, key_type: ast.ScalarType) !void {
@@ -811,6 +997,9 @@ fn emit_decode_map_value_decl(e: *Emitter, value_type: ast.TypeRef) !void {
         },
         .named => |name| {
             try e.print("var entry_val: ?{s} = null;\n", .{name});
+        },
+        .enum_ref => |name| {
+            try e.print("var entry_val: {s} = @enumFromInt(0);\n", .{name});
         },
     }
 }
@@ -837,6 +1026,9 @@ fn emit_decode_map_value_case(e: *Emitter, value_type: ast.TypeRef) !void {
         },
         .named => |name| {
             try e.print("2 => entry_val = try {s}.decode(allocator, entry.value.len),\n", .{name});
+        },
+        .enum_ref => {
+            try e.print("2 => entry_val = @enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(entry.value.varint))))),\n", .{});
         },
     }
 }
@@ -876,6 +1068,9 @@ fn emit_decode_oneof_field_case(e: *Emitter, field: ast.Field, oneof: ast.Oneof)
         },
         .named => |name| {
             try e.print_raw("result.{f} = .{{ .{f} = try {s}.decode(allocator, field.value.len) }},\n", .{ oneof_escaped, field_escaped, name });
+        },
+        .enum_ref => {
+            try e.print_raw("result.{f} = .{{ .{f} = @enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(field.value.varint))))) }},\n", .{ oneof_escaped, field_escaped });
         },
     }
 }
@@ -945,6 +1140,15 @@ fn emit_deinit_field(e: *Emitter, field: ast.Field) !void {
                 },
             }
         },
+        .enum_ref => {
+            // Enums are value types — only free the slice for repeated
+            switch (field.label) {
+                .implicit, .optional, .required => {},
+                .repeated => {
+                    try e.print("if (self.{f}.len > 0) allocator.free(self.{f});\n", .{ escaped, escaped });
+                },
+            }
+        },
     }
 }
 
@@ -965,6 +1169,9 @@ fn emit_deinit_map(e: *Emitter, map_field: ast.MapField) !void {
         },
         .named => {
             try e.print("for (self.{f}.values()) |*val| val.deinit(allocator);\n", .{escaped});
+        },
+        .enum_ref => {
+            // Enum values don't need freeing
         },
     }
 
@@ -988,6 +1195,9 @@ fn emit_deinit_oneof(e: *Emitter, oneof: ast.Oneof) !void {
             },
             .named => {
                 try e.print(".{f} => |*sub| sub.deinit(allocator),\n", .{field_escaped});
+            },
+            .enum_ref => {
+                try e.print(".{f} => {{}},\n", .{field_escaped});
             },
         }
     }
@@ -1142,6 +1352,49 @@ fn emit_json_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                 },
             }
         },
+        .enum_ref => {
+            switch (field.label) {
+                .implicit => {
+                    try e.print("if (@intFromEnum(self.{f}) != 0)", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try json.write_int(writer, @as(i64, @intFromEnum(self.{f})));\n", .{escaped});
+                    try e.close_brace_nosemi();
+                },
+                .optional => {
+                    try e.print("if (self.{f}) |v|", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try json.write_int(writer, @as(i64, @intFromEnum(v)));\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .required => {
+                    try e.print("{{\n", .{});
+                    e.indent_level += 1;
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try json.write_int(writer, @as(i64, @intFromEnum(self.{f})));\n", .{escaped});
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
+                },
+                .repeated => {
+                    try e.print("if (self.{f}.len > 0)", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try json.write_array_start(writer);\n", .{});
+                    try e.print("for (self.{f}, 0..) |item, i|", .{escaped});
+                    try e.open_brace();
+                    try e.print("if (i > 0) try writer.writeByte(',');\n", .{});
+                    try e.print("try json.write_int(writer, @as(i64, @intFromEnum(item)));\n", .{});
+                    try e.close_brace_nosemi();
+                    try e.print("try json.write_array_end(writer);\n", .{});
+                    try e.close_brace_nosemi();
+                },
+            }
+        },
     }
 }
 
@@ -1276,6 +1529,9 @@ fn emit_json_map_value(e: *Emitter, value_type: ast.TypeRef) !void {
         .named => {
             try e.print("try val.to_json(writer);\n", .{});
         },
+        .enum_ref => {
+            try e.print("try json.write_int(writer, @as(i64, @intFromEnum(val)));\n", .{});
+        },
     }
 }
 
@@ -1312,7 +1568,7 @@ fn emit_json_oneof(e: *Emitter, oneof: ast.Oneof) !void {
                         try e.print("try json.{s}(writer, v);\n", .{write_fn});
                     },
                 }
-                try e.close_brace_nosemi();
+                try e.close_brace_comma();
             },
             .named => {
                 try e.print(".{f} => |sub|", .{field_escaped});
@@ -1320,7 +1576,15 @@ fn emit_json_oneof(e: *Emitter, oneof: ast.Oneof) !void {
                 try e.print("first = try json.write_field_sep(writer, first);\n", .{});
                 try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
                 try e.print("try sub.to_json(writer);\n", .{});
-                try e.close_brace_nosemi();
+                try e.close_brace_comma();
+            },
+            .enum_ref => {
+                try e.print(".{f} => |v|", .{field_escaped});
+                try e.open_brace();
+                try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                try e.print("try json.write_int(writer, @as(i64, @intFromEnum(v)));\n", .{});
+                try e.close_brace_comma();
             },
         }
     }

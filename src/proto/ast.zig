@@ -67,8 +67,10 @@ pub const FieldLabel = enum {
 pub const TypeRef = union(enum) {
     /// Built-in scalar type.
     scalar: ScalarType,
-    /// Reference to a message or enum type (not yet resolved).
+    /// Reference to a message type.
     named: []const u8,
+    /// Reference to an enum type (resolved from named by codegen).
+    enum_ref: []const u8,
 };
 
 pub const ScalarType = enum {

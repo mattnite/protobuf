@@ -71,7 +71,7 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
 
     // Resolve proto source directory
     const src_path = self.proto_sources.getPath3(b, step);
-    var src_dir = src_path.root_dir.handle.openDir(src_path.sub_path, .{}) catch |err| {
+    var src_dir = src_path.root_dir.handle.openDir(src_path.sub_path, .{ .iterate = true }) catch |err| {
         return step.fail("cannot open proto source directory: {s}", .{@errorName(err)});
     };
     defer src_dir.close();
@@ -195,7 +195,7 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
         hasher.update(src.content);
     }
     const hash = hasher.final();
-    var hash_buf: [24]u8 = undefined;
+    var hash_buf: [32]u8 = undefined;
     const hash_hex = std.fmt.bufPrint(&hash_buf, "protobuf-{x:0>16}", .{hash}) catch unreachable;
 
     // Create output directory and write files

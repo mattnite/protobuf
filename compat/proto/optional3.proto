@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+
+message OptionalMessage {
+    optional int32 opt_int = 1;
+    optional string opt_str = 2;
+    optional bool opt_bool = 3;
+    optional double opt_double = 4;
+    int32 regular_int = 5;
+}

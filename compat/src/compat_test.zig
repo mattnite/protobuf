@@ -1,0 +1,838 @@
+const std = @import("std");
+const testing = std.testing;
+const proto = @import("proto");
+const message = @import("protobuf").message;
+const encoding = @import("protobuf").encoding;
+const framing = @import("framing.zig");
+
+// Each proto file generates its own module (no shared package)
+const ScalarMessage = proto.@"scalar3".ScalarMessage;
+const Inner = proto.@"nested3".Inner;
+const Middle = proto.@"nested3".Middle;
+const Outer = proto.@"nested3".Outer;
+const Color = proto.@"enum3".Color;
+const EnumMessage = proto.@"enum3".EnumMessage;
+const OneofMessage = proto.@"oneof3".OneofMessage;
+const SubMsg = proto.@"oneof3".SubMsg;
+const RepeatedMessage = proto.@"repeated3".RepeatedMessage;
+const RepItem = proto.@"repeated3".RepItem;
+const MapMessage = proto.@"map3".MapMessage;
+const MapSubMsg = proto.@"map3".MapSubMsg;
+const OptionalMessage = proto.@"optional3".OptionalMessage;
+const EdgeMessage = proto.@"edge3".EdgeMessage;
+const Scalar2Message = proto.@"scalar2".Scalar2Message;
+const Required2Message = proto.@"required2".Required2Message;
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+fn encode_to_buf(comptime T: type, msg: T) ![]const u8 {
+    var buf: [8192]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try msg.encode(&w);
+    const encoded = w.buffered();
+    const result = try testing.allocator.alloc(u8, encoded.len);
+    @memcpy(result, encoded);
+    return result;
+}
+
+fn decode_msg(comptime T: type, data: []const u8) !T {
+    return try T.decode(testing.allocator, data);
+}
+
+fn write_test_vectors(comptime _: type, cases: anytype, path: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
+    var file = try std.fs.cwd().createFile(path, .{});
+    defer file.close();
+
+    var buf: [65536]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+
+    for (cases) |tc| {
+        var msg_buf: [8192]u8 = undefined;
+        var msg_w: std.Io.Writer = .fixed(&msg_buf);
+        try tc.msg.encode(&msg_w);
+        try framing.write_test_case(&w, tc.name, msg_w.buffered());
+    }
+
+    try file.writeAll(w.buffered());
+}
+
+fn read_go_vectors(path: []const u8) !?[]const u8 {
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    const stat = try file.stat();
+    if (stat.size == 0) return null;
+    const data = try testing.allocator.alloc(u8, stat.size);
+    const n = try file.readAll(data);
+    if (n == 0) {
+        testing.allocator.free(data);
+        return null;
+    }
+    return data[0..n];
+}
+
+// ── Scalar3 Tests ─────────────────────────────────────────────────────
+
+test "scalar3: encode/decode round-trip - all defaults" {
+    const msg = ScalarMessage{};
+    const data = try encode_to_buf(ScalarMessage, msg);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(usize, 0), data.len);
+
+    var decoded = try decode_msg(ScalarMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(f64, 0), decoded.f_double);
+    try testing.expectEqual(@as(i32, 0), decoded.f_int32);
+    try testing.expectEqual(false, decoded.f_bool);
+    try testing.expectEqualStrings("", decoded.f_string);
+}
+
+test "scalar3: encode/decode round-trip - all set" {
+    const msg = ScalarMessage{
+        .f_double = 1.5,
+        .f_float = 2.5,
+        .f_int32 = 42,
+        .f_int64 = 100000,
+        .f_uint32 = 200,
+        .f_uint64 = 300000,
+        .f_sint32 = -10,
+        .f_sint64 = -20000,
+        .f_fixed32 = 999,
+        .f_fixed64 = 888888,
+        .f_sfixed32 = -55,
+        .f_sfixed64 = -66666,
+        .f_bool = true,
+        .f_string = "hello",
+        .f_bytes = "world",
+        .f_large_tag = 77,
+    };
+
+    const data = try encode_to_buf(ScalarMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(ScalarMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(f64, 1.5), decoded.f_double);
+    try testing.expectEqual(@as(f32, 2.5), decoded.f_float);
+    try testing.expectEqual(@as(i32, 42), decoded.f_int32);
+    try testing.expectEqual(@as(i64, 100000), decoded.f_int64);
+    try testing.expectEqual(@as(u32, 200), decoded.f_uint32);
+    try testing.expectEqual(@as(u64, 300000), decoded.f_uint64);
+    try testing.expectEqual(@as(i32, -10), decoded.f_sint32);
+    try testing.expectEqual(@as(i64, -20000), decoded.f_sint64);
+    try testing.expectEqual(@as(u32, 999), decoded.f_fixed32);
+    try testing.expectEqual(@as(u64, 888888), decoded.f_fixed64);
+    try testing.expectEqual(@as(i32, -55), decoded.f_sfixed32);
+    try testing.expectEqual(@as(i64, -66666), decoded.f_sfixed64);
+    try testing.expectEqual(true, decoded.f_bool);
+    try testing.expectEqualStrings("hello", decoded.f_string);
+    try testing.expectEqualStrings("world", decoded.f_bytes);
+    try testing.expectEqual(@as(i32, 77), decoded.f_large_tag);
+}
+
+test "scalar3: max values" {
+    const msg = ScalarMessage{
+        .f_int32 = std.math.maxInt(i32),
+        .f_int64 = std.math.maxInt(i64),
+        .f_uint32 = std.math.maxInt(u32),
+        .f_uint64 = std.math.maxInt(u64),
+        .f_double = 1.7976931348623157e+308,
+        .f_string = "a long string value for testing purposes",
+    };
+
+    const data = try encode_to_buf(ScalarMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(ScalarMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(std.math.maxInt(i32), decoded.f_int32);
+    try testing.expectEqual(std.math.maxInt(i64), decoded.f_int64);
+    try testing.expectEqual(std.math.maxInt(u32), decoded.f_uint32);
+    try testing.expectEqual(std.math.maxInt(u64), decoded.f_uint64);
+}
+
+test "scalar3: min values" {
+    const msg = ScalarMessage{
+        .f_int32 = std.math.minInt(i32),
+        .f_int64 = std.math.minInt(i64),
+        .f_double = -1.7976931348623157e+308,
+        .f_float = -3.4028235e+38,
+    };
+
+    const data = try encode_to_buf(ScalarMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(ScalarMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(std.math.minInt(i32), decoded.f_int32);
+    try testing.expectEqual(std.math.minInt(i64), decoded.f_int64);
+}
+
+test "scalar3: large tag only" {
+    const msg = ScalarMessage{
+        .f_large_tag = 12345,
+    };
+
+    const data = try encode_to_buf(ScalarMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(ScalarMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(i32, 12345), decoded.f_large_tag);
+}
+
+// ── Scalar3 Go vector validation ──────────────────────────────────────
+
+test "scalar3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/scalar3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try ScalarMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "all_defaults")) {
+            try testing.expectEqual(@as(f64, 0), decoded.f_double);
+            try testing.expectEqual(@as(i32, 0), decoded.f_int32);
+            try testing.expectEqual(false, decoded.f_bool);
+        } else if (std.mem.eql(u8, tc.name, "all_set")) {
+            try testing.expectEqual(@as(f64, 1.5), decoded.f_double);
+            try testing.expectEqual(@as(f32, 2.5), decoded.f_float);
+            try testing.expectEqual(@as(i32, 42), decoded.f_int32);
+            try testing.expectEqual(@as(i64, 100000), decoded.f_int64);
+            try testing.expectEqual(@as(u32, 200), decoded.f_uint32);
+            try testing.expectEqual(@as(u64, 300000), decoded.f_uint64);
+            try testing.expectEqual(@as(i32, -10), decoded.f_sint32);
+            try testing.expectEqual(@as(i64, -20000), decoded.f_sint64);
+            try testing.expectEqual(@as(u32, 999), decoded.f_fixed32);
+            try testing.expectEqual(@as(u64, 888888), decoded.f_fixed64);
+            try testing.expectEqual(@as(i32, -55), decoded.f_sfixed32);
+            try testing.expectEqual(@as(i64, -66666), decoded.f_sfixed64);
+            try testing.expectEqual(true, decoded.f_bool);
+            try testing.expectEqualStrings("hello", decoded.f_string);
+            try testing.expectEqualStrings("world", decoded.f_bytes);
+            try testing.expectEqual(@as(i32, 77), decoded.f_large_tag);
+        } else if (std.mem.eql(u8, tc.name, "max_values")) {
+            try testing.expectEqual(std.math.maxInt(i32), decoded.f_int32);
+            try testing.expectEqual(std.math.maxInt(i64), decoded.f_int64);
+            try testing.expectEqual(std.math.maxInt(u32), decoded.f_uint32);
+            try testing.expectEqual(std.math.maxInt(u64), decoded.f_uint64);
+        } else if (std.mem.eql(u8, tc.name, "min_values")) {
+            try testing.expectEqual(std.math.minInt(i32), decoded.f_int32);
+            try testing.expectEqual(std.math.minInt(i64), decoded.f_int64);
+        } else if (std.mem.eql(u8, tc.name, "large_tag_only")) {
+            try testing.expectEqual(@as(i32, 12345), decoded.f_large_tag);
+        }
+    }
+}
+
+test "scalar3: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: ScalarMessage }{
+        .{ .name = "all_defaults", .msg = .{} },
+        .{ .name = "all_set", .msg = .{
+            .f_double = 1.5,
+            .f_float = 2.5,
+            .f_int32 = 42,
+            .f_int64 = 100000,
+            .f_uint32 = 200,
+            .f_uint64 = 300000,
+            .f_sint32 = -10,
+            .f_sint64 = -20000,
+            .f_fixed32 = 999,
+            .f_fixed64 = 888888,
+            .f_sfixed32 = -55,
+            .f_sfixed64 = -66666,
+            .f_bool = true,
+            .f_string = "hello",
+            .f_bytes = "world",
+            .f_large_tag = 77,
+        } },
+        .{ .name = "max_values", .msg = .{
+            .f_int32 = std.math.maxInt(i32),
+            .f_int64 = std.math.maxInt(i64),
+            .f_uint32 = std.math.maxInt(u32),
+            .f_uint64 = std.math.maxInt(u64),
+            .f_double = 1.7976931348623157e+308,
+            .f_string = "a long string value for testing purposes",
+        } },
+        .{ .name = "min_values", .msg = .{
+            .f_int32 = std.math.minInt(i32),
+            .f_int64 = std.math.minInt(i64),
+            .f_double = -1.7976931348623157e+308,
+            .f_float = -3.4028235e+38,
+        } },
+        .{ .name = "large_tag_only", .msg = .{
+            .f_large_tag = 12345,
+        } },
+    };
+
+    try write_test_vectors(ScalarMessage, &cases, "testdata/zig/scalar3.bin");
+}
+
+// ── Nested3 Tests ─────────────────────────────────────────────────────
+
+test "nested3: encode/decode round-trip - empty" {
+    const msg = Outer{};
+    const data = try encode_to_buf(Outer, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(Outer, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(?Middle, null), decoded.middle);
+    try testing.expectEqual(@as(?Inner, null), decoded.direct_inner);
+}
+
+test "nested3: encode/decode round-trip - two levels" {
+    const msg = Outer{
+        .middle = .{
+            .inner = .{ .value = 42, .label = "inner_label" },
+            .id = 10,
+        },
+        .direct_inner = .{ .value = 99, .label = "direct" },
+        .name = "outer",
+    };
+
+    const data = try encode_to_buf(Outer, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(Outer, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 10), decoded.middle.?.id);
+    try testing.expectEqual(@as(i32, 42), decoded.middle.?.inner.?.value);
+    try testing.expectEqualStrings("inner_label", decoded.middle.?.inner.?.label);
+    try testing.expectEqual(@as(i32, 99), decoded.direct_inner.?.value);
+    try testing.expectEqualStrings("direct", decoded.direct_inner.?.label);
+    try testing.expectEqualStrings("outer", decoded.name);
+}
+
+test "nested3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/nested3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try Outer.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "empty")) {
+            try testing.expectEqual(@as(?Middle, null), decoded.middle);
+        } else if (std.mem.eql(u8, tc.name, "two_levels")) {
+            try testing.expectEqual(@as(i32, 42), decoded.middle.?.inner.?.value);
+            try testing.expectEqual(@as(i32, 10), decoded.middle.?.id);
+            try testing.expectEqualStrings("outer", decoded.name);
+        } else if (std.mem.eql(u8, tc.name, "single_level")) {
+            try testing.expectEqual(@as(?Middle, null), decoded.middle);
+            try testing.expectEqual(@as(i32, 5), decoded.direct_inner.?.value);
+        }
+    }
+}
+
+test "nested3: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: Outer }{
+        .{ .name = "empty", .msg = .{} },
+        .{ .name = "two_levels", .msg = .{
+            .middle = .{
+                .inner = .{ .value = 42, .label = "inner_label" },
+                .id = 10,
+            },
+            .direct_inner = .{ .value = 99, .label = "direct" },
+            .name = "outer",
+        } },
+        .{ .name = "single_level", .msg = .{
+            .direct_inner = .{ .value = 5, .label = "only" },
+        } },
+    };
+
+    try write_test_vectors(Outer, &cases, "testdata/zig/nested3.bin");
+}
+
+// ── Enum3 Tests ───────────────────────────────────────────────────────
+
+test "enum3: encode/decode round-trip - default" {
+    const msg = EnumMessage{};
+    const data = try encode_to_buf(EnumMessage, msg);
+    defer testing.allocator.free(data);
+
+    // Default enum value is 0, which is skipped in proto3 implicit
+    try testing.expectEqual(@as(usize, 0), data.len);
+
+    var decoded = try decode_msg(EnumMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(Color.COLOR_UNSPECIFIED, decoded.color);
+    try testing.expectEqual(@as(usize, 0), decoded.colors.len);
+    try testing.expectEqualStrings("", decoded.name);
+}
+
+test "enum3: encode/decode round-trip - non-default" {
+    const msg = EnumMessage{
+        .color = .COLOR_RED,
+        .name = "test",
+    };
+
+    const data = try encode_to_buf(EnumMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(EnumMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(Color.COLOR_RED, decoded.color);
+    try testing.expectEqualStrings("test", decoded.name);
+}
+
+test "enum3: encode/decode round-trip - repeated enums" {
+    // Create repeated enum values
+    const colors = &[_]Color{ .COLOR_RED, .COLOR_GREEN, .COLOR_BLUE };
+    const msg = EnumMessage{
+        .color = .COLOR_BLUE,
+        .colors = colors,
+        .name = "multi",
+    };
+
+    const data = try encode_to_buf(EnumMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(EnumMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(Color.COLOR_BLUE, decoded.color);
+    try testing.expectEqual(@as(usize, 3), decoded.colors.len);
+    try testing.expectEqual(Color.COLOR_RED, decoded.colors[0]);
+    try testing.expectEqual(Color.COLOR_GREEN, decoded.colors[1]);
+    try testing.expectEqual(Color.COLOR_BLUE, decoded.colors[2]);
+    try testing.expectEqualStrings("multi", decoded.name);
+}
+
+test "enum3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/enum3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try EnumMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "default")) {
+            try testing.expectEqual(Color.COLOR_UNSPECIFIED, decoded.color);
+        } else if (std.mem.eql(u8, tc.name, "red")) {
+            try testing.expectEqual(Color.COLOR_RED, decoded.color);
+        } else if (std.mem.eql(u8, tc.name, "repeated")) {
+            try testing.expectEqual(@as(usize, 3), decoded.colors.len);
+        }
+    }
+}
+
+test "enum3: write Zig test vectors" {
+    const colors = &[_]Color{ .COLOR_RED, .COLOR_GREEN, .COLOR_BLUE };
+    const cases = [_]struct { name: []const u8, msg: EnumMessage }{
+        .{ .name = "default", .msg = .{} },
+        .{ .name = "red", .msg = .{ .color = .COLOR_RED, .name = "red_test" } },
+        .{ .name = "repeated", .msg = .{ .color = .COLOR_BLUE, .colors = colors, .name = "multi" } },
+    };
+
+    try write_test_vectors(EnumMessage, &cases, "testdata/zig/enum3.bin");
+}
+
+// ── Oneof3 Tests ──────────────────────────────────────────────────────
+
+test "oneof3: encode/decode round-trip - string variant" {
+    const msg = OneofMessage{
+        .name = "test",
+        .value = .{ .str_val = "hello" },
+    };
+
+    const data = try encode_to_buf(OneofMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(OneofMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("test", decoded.name);
+    try testing.expectEqualStrings("hello", decoded.value.?.str_val);
+}
+
+test "oneof3: encode/decode round-trip - int variant" {
+    const msg = OneofMessage{
+        .name = "int_test",
+        .value = .{ .int_val = 42 },
+    };
+
+    const data = try encode_to_buf(OneofMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(OneofMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 42), decoded.value.?.int_val);
+}
+
+test "oneof3: encode/decode round-trip - msg variant" {
+    const msg = OneofMessage{
+        .name = "msg_test",
+        .value = .{ .msg_val = .{ .id = 1, .text = "sub" } },
+    };
+
+    const data = try encode_to_buf(OneofMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(OneofMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 1), decoded.value.?.msg_val.id);
+    try testing.expectEqualStrings("sub", decoded.value.?.msg_val.text);
+}
+
+test "oneof3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/oneof3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try OneofMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "none_set")) {
+            try testing.expectEqual(@as(?OneofMessage.Value, null), decoded.value);
+        } else if (std.mem.eql(u8, tc.name, "string_variant")) {
+            try testing.expectEqualStrings("hello", decoded.value.?.str_val);
+        } else if (std.mem.eql(u8, tc.name, "int_variant")) {
+            try testing.expectEqual(@as(i32, 42), decoded.value.?.int_val);
+        } else if (std.mem.eql(u8, tc.name, "msg_variant")) {
+            try testing.expectEqual(@as(i32, 1), decoded.value.?.msg_val.id);
+        }
+    }
+}
+
+test "oneof3: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: OneofMessage }{
+        .{ .name = "none_set", .msg = .{ .name = "empty" } },
+        .{ .name = "string_variant", .msg = .{ .name = "test", .value = .{ .str_val = "hello" } } },
+        .{ .name = "int_variant", .msg = .{ .name = "test", .value = .{ .int_val = 42 } } },
+        .{ .name = "bytes_variant", .msg = .{ .name = "test", .value = .{ .bytes_val = "\x01\x02\x03" } } },
+        .{ .name = "msg_variant", .msg = .{ .name = "test", .value = .{ .msg_val = .{ .id = 1, .text = "sub" } } } },
+    };
+
+    try write_test_vectors(OneofMessage, &cases, "testdata/zig/oneof3.bin");
+}
+
+// ── Optional3 Tests ───────────────────────────────────────────────────
+
+test "optional3: encode/decode round-trip - all unset" {
+    const msg = OptionalMessage{};
+    const data = try encode_to_buf(OptionalMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(OptionalMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?i32, null), decoded.opt_int);
+    try testing.expectEqual(@as(?[]const u8, null), decoded.opt_str);
+    try testing.expectEqual(@as(?bool, null), decoded.opt_bool);
+    try testing.expectEqual(@as(?f64, null), decoded.opt_double);
+    try testing.expectEqual(@as(i32, 0), decoded.regular_int);
+}
+
+test "optional3: encode/decode round-trip - all zero" {
+    const msg = OptionalMessage{
+        .opt_int = 0,
+        .opt_str = "",
+        .opt_bool = false,
+        .opt_double = 0.0,
+        .regular_int = 0,
+    };
+
+    const data = try encode_to_buf(OptionalMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(OptionalMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?i32, 0), decoded.opt_int);
+    try testing.expectEqual(@as(?bool, false), decoded.opt_bool);
+    try testing.expectEqual(@as(?f64, 0.0), decoded.opt_double);
+}
+
+test "optional3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/optional3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try OptionalMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "all_unset")) {
+            try testing.expectEqual(@as(?i32, null), decoded.opt_int);
+            try testing.expectEqual(@as(?[]const u8, null), decoded.opt_str);
+        } else if (std.mem.eql(u8, tc.name, "all_zero")) {
+            try testing.expectEqual(@as(?i32, 0), decoded.opt_int);
+            try testing.expectEqual(@as(?bool, false), decoded.opt_bool);
+        } else if (std.mem.eql(u8, tc.name, "all_nonzero")) {
+            try testing.expectEqual(@as(?i32, 42), decoded.opt_int);
+            try testing.expectEqual(@as(?bool, true), decoded.opt_bool);
+        }
+    }
+}
+
+test "optional3: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: OptionalMessage }{
+        .{ .name = "all_unset", .msg = .{} },
+        .{ .name = "all_zero", .msg = .{
+            .opt_int = 0,
+            .opt_str = "",
+            .opt_bool = false,
+            .opt_double = 0.0,
+        } },
+        .{ .name = "all_nonzero", .msg = .{
+            .opt_int = 42,
+            .opt_str = "hello",
+            .opt_bool = true,
+            .opt_double = 3.14,
+            .regular_int = 100,
+        } },
+    };
+
+    try write_test_vectors(OptionalMessage, &cases, "testdata/zig/optional3.bin");
+}
+
+// ── Edge3 Tests ───────────────────────────────────────────────────────
+
+test "edge3: encode/decode round-trip" {
+    const msg = EdgeMessage{
+        .f_nan = std.math.nan(f64),
+        .f_pos_inf = std.math.inf(f64),
+        .f_neg_inf = -std.math.inf(f64),
+        .f_max_int32 = std.math.maxInt(i32),
+        .f_min_int32 = std.math.minInt(i32),
+        .f_max_int64 = std.math.maxInt(i64),
+        .f_min_int64 = std.math.minInt(i64),
+        .f_max_uint32 = std.math.maxInt(u32),
+        .f_max_uint64 = std.math.maxInt(u64),
+        .f_unicode = "hello \xc3\xa9\xc3\xa0\xc3\xbc \xe4\xb8\x96\xe7\x95\x8c",
+        .f_binary = "\x00\x01\x02\xff\xfe\xfd",
+        .f_empty_str = "",
+        .f_empty_bytes = "",
+    };
+
+    const data = try encode_to_buf(EdgeMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(EdgeMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(std.math.isNan(decoded.f_nan));
+    try testing.expect(std.math.isInf(decoded.f_pos_inf));
+    try testing.expectEqual(-std.math.inf(f64), decoded.f_neg_inf);
+    try testing.expectEqual(std.math.maxInt(i32), decoded.f_max_int32);
+    try testing.expectEqual(std.math.minInt(i32), decoded.f_min_int32);
+    try testing.expectEqual(std.math.maxInt(i64), decoded.f_max_int64);
+    try testing.expectEqual(std.math.minInt(i64), decoded.f_min_int64);
+    try testing.expectEqual(std.math.maxInt(u32), decoded.f_max_uint32);
+    try testing.expectEqual(std.math.maxInt(u64), decoded.f_max_uint64);
+    try testing.expectEqualStrings("hello \xc3\xa9\xc3\xa0\xc3\xbc \xe4\xb8\x96\xe7\x95\x8c", decoded.f_unicode);
+    try testing.expectEqualSlices(u8, "\x00\x01\x02\xff\xfe\xfd", decoded.f_binary);
+}
+
+test "edge3: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/edge3.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try EdgeMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "special_floats")) {
+            try testing.expect(std.math.isNan(decoded.f_nan));
+            try testing.expect(std.math.isInf(decoded.f_pos_inf));
+            try testing.expectEqual(-std.math.inf(f64), decoded.f_neg_inf);
+        } else if (std.mem.eql(u8, tc.name, "extreme_ints")) {
+            try testing.expectEqual(std.math.maxInt(i32), decoded.f_max_int32);
+            try testing.expectEqual(std.math.minInt(i32), decoded.f_min_int32);
+            try testing.expectEqual(std.math.maxInt(i64), decoded.f_max_int64);
+            try testing.expectEqual(std.math.minInt(i64), decoded.f_min_int64);
+            try testing.expectEqual(std.math.maxInt(u32), decoded.f_max_uint32);
+            try testing.expectEqual(std.math.maxInt(u64), decoded.f_max_uint64);
+        }
+    }
+}
+
+test "edge3: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: EdgeMessage }{
+        .{ .name = "special_floats", .msg = .{
+            .f_nan = std.math.nan(f64),
+            .f_pos_inf = std.math.inf(f64),
+            .f_neg_inf = -std.math.inf(f64),
+        } },
+        .{ .name = "extreme_ints", .msg = .{
+            .f_max_int32 = std.math.maxInt(i32),
+            .f_min_int32 = std.math.minInt(i32),
+            .f_max_int64 = std.math.maxInt(i64),
+            .f_min_int64 = std.math.minInt(i64),
+            .f_max_uint32 = std.math.maxInt(u32),
+            .f_max_uint64 = std.math.maxInt(u64),
+        } },
+        .{ .name = "unicode_and_binary", .msg = .{
+            .f_unicode = "hello \xc3\xa9\xc3\xa0\xc3\xbc \xe4\xb8\x96\xe7\x95\x8c",
+            .f_binary = "\x00\x01\x02\xff\xfe\xfd",
+        } },
+    };
+
+    try write_test_vectors(EdgeMessage, &cases, "testdata/zig/edge3.bin");
+}
+
+// ── Scalar2 Tests ─────────────────────────────────────────────────────
+
+test "scalar2: encode/decode round-trip" {
+    const msg = Scalar2Message{
+        .f_double = 1.5,
+        .f_int32 = 42,
+        .f_string = "hello",
+        .f_bool = true,
+    };
+
+    const data = try encode_to_buf(Scalar2Message, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(Scalar2Message, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?f64, 1.5), decoded.f_double);
+    try testing.expectEqual(@as(?i32, 42), decoded.f_int32);
+    try testing.expectEqualStrings("hello", decoded.f_string.?);
+    try testing.expectEqual(@as(?bool, true), decoded.f_bool);
+}
+
+test "scalar2: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/scalar2.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try Scalar2Message.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "all_set")) {
+            try testing.expectEqual(@as(?f64, 1.5), decoded.f_double);
+            try testing.expectEqual(@as(?i32, 42), decoded.f_int32);
+            try testing.expectEqual(@as(?bool, true), decoded.f_bool);
+        } else if (std.mem.eql(u8, tc.name, "all_absent")) {
+            try testing.expectEqual(@as(?f64, null), decoded.f_double);
+            try testing.expectEqual(@as(?i32, null), decoded.f_int32);
+        }
+    }
+}
+
+test "scalar2: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: Scalar2Message }{
+        .{ .name = "all_absent", .msg = .{} },
+        .{ .name = "all_set", .msg = .{
+            .f_double = 1.5,
+            .f_float = 2.5,
+            .f_int32 = 42,
+            .f_int64 = 100000,
+            .f_uint32 = 200,
+            .f_uint64 = 300000,
+            .f_sint32 = -10,
+            .f_sint64 = -20000,
+            .f_fixed32 = 999,
+            .f_fixed64 = 888888,
+            .f_sfixed32 = -55,
+            .f_sfixed64 = -66666,
+            .f_bool = true,
+            .f_string = "hello",
+            .f_bytes = "world",
+        } },
+    };
+
+    try write_test_vectors(Scalar2Message, &cases, "testdata/zig/scalar2.bin");
+}
+
+// ── Required2 Tests ───────────────────────────────────────────────────
+
+test "required2: encode/decode round-trip" {
+    const msg = Required2Message{
+        .req_id = 42,
+        .req_name = "required",
+        .opt_value = 10,
+        .opt_label = "optional",
+    };
+
+    const data = try encode_to_buf(Required2Message, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(Required2Message, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 42), decoded.req_id);
+    try testing.expectEqualStrings("required", decoded.req_name);
+    try testing.expectEqual(@as(?i32, 10), decoded.opt_value);
+    try testing.expectEqualStrings("optional", decoded.opt_label.?);
+}
+
+test "required2: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/required2.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try Required2Message.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "all_present")) {
+            try testing.expectEqual(@as(i32, 42), decoded.req_id);
+            try testing.expectEqualStrings("required", decoded.req_name);
+            try testing.expectEqual(@as(?i32, 10), decoded.opt_value);
+        } else if (std.mem.eql(u8, tc.name, "required_only")) {
+            try testing.expectEqual(@as(i32, 1), decoded.req_id);
+            try testing.expectEqualStrings("min", decoded.req_name);
+            try testing.expectEqual(@as(?i32, null), decoded.opt_value);
+        }
+    }
+}
+
+test "required2: write Zig test vectors" {
+    const cases = [_]struct { name: []const u8, msg: Required2Message }{
+        .{ .name = "all_present", .msg = .{
+            .req_id = 42,
+            .req_name = "required",
+            .opt_value = 10,
+            .opt_label = "optional",
+        } },
+        .{ .name = "required_only", .msg = .{
+            .req_id = 1,
+            .req_name = "min",
+        } },
+    };
+
+    try write_test_vectors(Required2Message, &cases, "testdata/zig/required2.bin");
+}

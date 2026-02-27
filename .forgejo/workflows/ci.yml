@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: x86_64-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run unit tests
+        run: zig build test
+
+  compat-tests:
+    runs-on: x86_64-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install curl
+        run: apt-get update && apt-get install -y curl
+
+      - name: Install Go
+        run: |
+          curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Go test vectors
+        working-directory: compat/go
+        run: go run ./cmd/generate
+
+      - name: Run Zig compat tests
+        working-directory: compat
+        run: zig build test
+
+      - name: Validate Zig vectors with Go
+        working-directory: compat/go
+        run: go run ./cmd/validate
