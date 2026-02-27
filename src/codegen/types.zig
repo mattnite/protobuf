@@ -164,6 +164,27 @@ pub fn scalar_wire_variant(s: ScalarType) []const u8 {
     };
 }
 
+/// Returns the descriptor.FieldType enum literal string for a scalar type.
+pub fn scalar_descriptor_type(s: ScalarType) []const u8 {
+    return switch (s) {
+        .double => ".double",
+        .float => ".float",
+        .int32 => ".int32",
+        .int64 => ".int64",
+        .uint32 => ".uint32",
+        .uint64 => ".uint64",
+        .sint32 => ".sint32",
+        .sint64 => ".sint64",
+        .fixed32 => ".fixed32",
+        .fixed64 => ".fixed64",
+        .sfixed32 => ".sfixed32",
+        .sfixed64 => ".sfixed64",
+        .bool => ".bool",
+        .string => ".string",
+        .bytes => ".bytes",
+    };
+}
+
 pub fn is_packable_scalar(s: ScalarType) bool {
     return s != .string and s != .bytes;
 }
@@ -660,4 +681,22 @@ test "scalar_text_read_fn: type mapping" {
     try testing.expectEqualStrings("read_bool", scalar_text_read_fn(.bool));
     try testing.expectEqualStrings("read_string", scalar_text_read_fn(.string));
     try testing.expectEqualStrings("read_string", scalar_text_read_fn(.bytes));
+}
+
+test "scalar_descriptor_type: all 15 types" {
+    try testing.expectEqualStrings(".double", scalar_descriptor_type(.double));
+    try testing.expectEqualStrings(".float", scalar_descriptor_type(.float));
+    try testing.expectEqualStrings(".int32", scalar_descriptor_type(.int32));
+    try testing.expectEqualStrings(".int64", scalar_descriptor_type(.int64));
+    try testing.expectEqualStrings(".uint32", scalar_descriptor_type(.uint32));
+    try testing.expectEqualStrings(".uint64", scalar_descriptor_type(.uint64));
+    try testing.expectEqualStrings(".sint32", scalar_descriptor_type(.sint32));
+    try testing.expectEqualStrings(".sint64", scalar_descriptor_type(.sint64));
+    try testing.expectEqualStrings(".fixed32", scalar_descriptor_type(.fixed32));
+    try testing.expectEqualStrings(".fixed64", scalar_descriptor_type(.fixed64));
+    try testing.expectEqualStrings(".sfixed32", scalar_descriptor_type(.sfixed32));
+    try testing.expectEqualStrings(".sfixed64", scalar_descriptor_type(.sfixed64));
+    try testing.expectEqualStrings(".bool", scalar_descriptor_type(.bool));
+    try testing.expectEqualStrings(".string", scalar_descriptor_type(.string));
+    try testing.expectEqualStrings(".bytes", scalar_descriptor_type(.bytes));
 }
