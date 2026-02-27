@@ -1620,3 +1620,17 @@ test "Parser: float constant" {
     const file = try parse_test("syntax = \"proto3\"; option foo = 3.14;");
     try testing.expectEqual(@as(f64, 3.14), file.options[0].value.float_value);
 }
+
+test "fuzz: Parser handles arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var diags: DiagnosticList = .empty;
+            const lex = lexer_mod.Lexer.init(input, "fuzz.proto");
+            var p = Parser.init(lex, allocator, &diags);
+            _ = p.parse_file() catch return;
+        }
+    }.run, .{});
+}

@@ -60,6 +60,18 @@ pub fn build(b: *std.Build) void {
 
     const protoc_test_step = b.step("protoc-test", "Run protoc plugin integration tests");
     protoc_test_step.dependOn(&b.addRunArtifact(protoc_tests).step);
+
+    // Benchmark executable
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&b.addRunArtifact(bench).step);
 }
 
 /// Create a GenerateStep that compiles .proto files into importable Zig modules.

@@ -759,3 +759,13 @@ test "read_bool: wrong token type" {
     defer s.deinit();
     try testing.expectError(JsonError.UnexpectedToken, read_bool(&s));
 }
+
+test "fuzz: JsonScanner handles arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var scanner = JsonScanner.init(std.testing.allocator, input);
+            defer scanner.deinit();
+            while (scanner.next() catch return) |_| {}
+        }
+    }.run, .{});
+}

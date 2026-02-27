@@ -104,6 +104,50 @@ pub fn scalar_size_fn(s: ScalarType) []const u8 {
     };
 }
 
+/// Returns the category of packed encoding for a scalar type.
+pub const PackedCategory = enum { varint, fixed32, fixed64 };
+
+pub fn scalar_packed_category(s: ScalarType) PackedCategory {
+    return switch (s) {
+        .int32, .int64, .uint32, .uint64, .sint32, .sint64, .bool => .varint,
+        .fixed32, .sfixed32, .float => .fixed32,
+        .fixed64, .sfixed64, .double => .fixed64,
+        .string, .bytes => unreachable,
+    };
+}
+
+/// Returns the varint size expression for computing packed data size of a scalar element.
+/// The variable name for the loop element is "item".
+pub fn scalar_packed_varint_size_expr(s: ScalarType) []const u8 {
+    return switch (s) {
+        .int32 => "encoding.varint_size(@as(u64, @bitCast(@as(i64, item))))",
+        .int64 => "encoding.varint_size(@as(u64, @bitCast(item)))",
+        .uint32 => "encoding.varint_size(@as(u64, item))",
+        .uint64 => "encoding.varint_size(item)",
+        .sint32 => "encoding.varint_size(@as(u64, encoding.zigzag_encode(item)))",
+        .sint64 => "encoding.varint_size(encoding.zigzag_encode_64(item))",
+        .bool => "encoding.varint_size(@intFromBool(item))",
+        else => unreachable,
+    };
+}
+
+/// Returns the raw encode expression for packed encoding (no tag, just raw value).
+/// The variable name for the loop element is "item".
+pub fn scalar_packed_encode_expr(s: ScalarType) []const u8 {
+    return switch (s) {
+        .int32 => "try encoding.encode_varint(writer, @as(u64, @bitCast(@as(i64, item))))",
+        .int64 => "try encoding.encode_varint(writer, @as(u64, @bitCast(item)))",
+        .uint32 => "try encoding.encode_varint(writer, @as(u64, item))",
+        .uint64 => "try encoding.encode_varint(writer, item)",
+        .sint32 => "try encoding.encode_varint(writer, @as(u64, encoding.zigzag_encode(item)))",
+        .sint64 => "try encoding.encode_varint(writer, encoding.zigzag_encode_64(item))",
+        .bool => "try encoding.encode_varint(writer, @intFromBool(item))",
+        .fixed32, .sfixed32, .float => "try encoding.encode_fixed32(writer, @bitCast(item))",
+        .fixed64, .sfixed64, .double => "try encoding.encode_fixed64(writer, @bitCast(item))",
+        .string, .bytes => unreachable,
+    };
+}
+
 /// Returns the expression to decode a scalar from a FieldValue.
 pub fn scalar_decode_expr(s: ScalarType) []const u8 {
     return switch (s) {
@@ -187,6 +231,40 @@ pub fn scalar_descriptor_type(s: ScalarType) []const u8 {
 
 pub fn is_packable_scalar(s: ScalarType) bool {
     return s != .string and s != .bytes;
+}
+
+/// Scans field options for an explicit "packed" option.
+/// Returns `true` if `[packed=true]`, `false` if `[packed=false]`, `null` if absent.
+pub fn has_explicit_packed_option(options: []const ast.FieldOption) ?bool {
+    for (options) |opt| {
+        if (opt.name.parts.len == 1 and !opt.name.parts[0].is_extension and std.mem.eql(u8, opt.name.parts[0].name, "packed")) {
+            return switch (opt.value) {
+                .bool_value => |b| b,
+                .identifier => |id| std.mem.eql(u8, id, "true"),
+                else => true,
+            };
+        }
+    }
+    return null;
+}
+
+/// Whether a repeated field should use packed encoding.
+/// Proto3: packed by default for all packable scalars/enums (unless explicitly unpacked).
+/// Proto2: only packed if [packed=true] is set explicitly.
+pub fn is_packed(field: ast.Field, syntax: ast.Syntax) bool {
+    if (field.label != .repeated) return false;
+    switch (field.type_name) {
+        .scalar => |s| {
+            if (!is_packable_scalar(s)) return false;
+            if (has_explicit_packed_option(field.options)) |v| return v;
+            return syntax == .proto3;
+        },
+        .enum_ref => {
+            if (has_explicit_packed_option(field.options)) |v| return v;
+            return syntax == .proto3;
+        },
+        .named => return false,
+    }
 }
 
 const zig_keywords = [_][]const u8{
@@ -699,4 +777,132 @@ test "scalar_descriptor_type: all 15 types" {
     try testing.expectEqualStrings(".bool", scalar_descriptor_type(.bool));
     try testing.expectEqualStrings(".string", scalar_descriptor_type(.string));
     try testing.expectEqualStrings(".bytes", scalar_descriptor_type(.bytes));
+}
+
+test "has_explicit_packed_option: returns true for packed=true" {
+    var parts = [_]ast.OptionName.Part{.{ .name = "packed", .is_extension = false }};
+    var opts = [_]ast.FieldOption{.{
+        .name = .{ .parts = &parts },
+        .value = .{ .bool_value = true },
+    }};
+    try testing.expectEqual(true, has_explicit_packed_option(&opts));
+}
+
+test "has_explicit_packed_option: returns false for packed=false" {
+    var parts = [_]ast.OptionName.Part{.{ .name = "packed", .is_extension = false }};
+    var opts = [_]ast.FieldOption{.{
+        .name = .{ .parts = &parts },
+        .value = .{ .bool_value = false },
+    }};
+    try testing.expectEqual(false, has_explicit_packed_option(&opts));
+}
+
+test "has_explicit_packed_option: returns null when absent" {
+    try testing.expect(has_explicit_packed_option(&.{}) == null);
+}
+
+test "is_packed: proto3 repeated int32 is packed by default" {
+    const field = ast.Field{
+        .name = "vals",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .scalar = .int32 },
+        .options = &.{},
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(is_packed(field, .proto3));
+}
+
+test "is_packed: proto2 repeated int32 is not packed by default" {
+    const field = ast.Field{
+        .name = "vals",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .scalar = .int32 },
+        .options = &.{},
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(!is_packed(field, .proto2));
+}
+
+test "is_packed: proto2 repeated with packed=true" {
+    var parts = [_]ast.OptionName.Part{.{ .name = "packed", .is_extension = false }};
+    var opts = [_]ast.FieldOption{.{
+        .name = .{ .parts = &parts },
+        .value = .{ .bool_value = true },
+    }};
+    const field = ast.Field{
+        .name = "vals",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .scalar = .int32 },
+        .options = &opts,
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(is_packed(field, .proto2));
+}
+
+test "is_packed: proto3 repeated with packed=false" {
+    var parts = [_]ast.OptionName.Part{.{ .name = "packed", .is_extension = false }};
+    var opts = [_]ast.FieldOption{.{
+        .name = .{ .parts = &parts },
+        .value = .{ .bool_value = false },
+    }};
+    const field = ast.Field{
+        .name = "vals",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .scalar = .int32 },
+        .options = &opts,
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(!is_packed(field, .proto3));
+}
+
+test "is_packed: non-repeated field is never packed" {
+    const field = ast.Field{
+        .name = "val",
+        .number = 1,
+        .label = .implicit,
+        .type_name = .{ .scalar = .int32 },
+        .options = &.{},
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(!is_packed(field, .proto3));
+}
+
+test "is_packed: repeated string is never packed" {
+    const field = ast.Field{
+        .name = "names",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .scalar = .string },
+        .options = &.{},
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(!is_packed(field, .proto3));
+}
+
+test "is_packed: repeated message is never packed" {
+    const field = ast.Field{
+        .name = "msgs",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .named = "MyMessage" },
+        .options = &.{},
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(!is_packed(field, .proto3));
+}
+
+test "is_packed: proto3 repeated enum is packed by default" {
+    const field = ast.Field{
+        .name = "vals",
+        .number = 1,
+        .label = .repeated,
+        .type_name = .{ .enum_ref = "MyEnum" },
+        .options = &.{},
+        .location = .{ .file = "", .line = 0, .column = 0 },
+    };
+    try testing.expect(is_packed(field, .proto3));
 }
