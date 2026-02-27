@@ -973,7 +973,10 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField) !void {
     try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
 
-    try e.print("try result.{f}.put(allocator, entry_key, entry_val);\n", .{escaped});
+    switch (map_field.value_type) {
+        .named => try e.print("try result.{f}.put(allocator, entry_key, entry_val orelse .{{}});\n", .{escaped}),
+        else => try e.print("try result.{f}.put(allocator, entry_key, entry_val);\n", .{escaped}),
+    }
     e.indent_level -= 1;
     try e.print("}},\n", .{});
 }
@@ -1135,7 +1138,12 @@ fn emit_deinit_field(e: *Emitter, field: ast.Field) !void {
                     try e.print("self.{f}.deinit(allocator);\n", .{escaped});
                 },
                 .repeated => {
-                    try e.print("for (self.{f}) |*item| item.deinit(allocator);\n", .{escaped});
+                    try e.print("for (self.{f}) |item| {{\n", .{escaped});
+                    e.indent_level += 1;
+                    try e.print("var m = item;\n", .{});
+                    try e.print("m.deinit(allocator);\n", .{});
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
                     try e.print("if (self.{f}.len > 0) allocator.free(self.{f});\n", .{ escaped, escaped });
                 },
             }
