@@ -266,6 +266,33 @@ pub fn scalar_json_value_expr(s: ScalarType, val_expr: []const u8, buf: []u8) []
     };
 }
 
+/// Returns the text_format.write_* function name for a scalar type.
+pub fn scalar_text_write_fn(s: ScalarType) []const u8 {
+    return switch (s) {
+        .double, .float => "write_float",
+        .int32, .sint32, .sfixed32 => "write_int",
+        .int64, .sint64, .sfixed64 => "write_int",
+        .uint32, .uint64, .fixed32, .fixed64 => "write_uint",
+        .bool => "write_bool",
+        .string => "write_string",
+        .bytes => "write_bytes",
+    };
+}
+
+/// Returns the text_format.read_* function name for parsing a scalar type from text format.
+pub fn scalar_text_read_fn(s: ScalarType) []const u8 {
+    return switch (s) {
+        .double => "read_float64",
+        .float => "read_float32",
+        .int32, .sint32, .sfixed32 => "read_int32",
+        .int64, .sint64, .sfixed64 => "read_int64",
+        .uint32, .fixed32 => "read_uint32",
+        .uint64, .fixed64 => "read_uint64",
+        .bool => "read_bool",
+        .string, .bytes => "read_string",
+    };
+}
+
 /// Returns the json.read_* function name for parsing a scalar type from JSON.
 pub fn scalar_json_read_fn(s: ScalarType) []const u8 {
     return switch (s) {
@@ -597,4 +624,40 @@ test "emit_default_literal: identifier nan" {
 test "emit_default_literal: enum identifier" {
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings(".GREEN", emit_default_literal(.{ .identifier = "GREEN" }, .int32, &buf));
+}
+
+test "scalar_text_write_fn: type mapping" {
+    try testing.expectEqualStrings("write_float", scalar_text_write_fn(.double));
+    try testing.expectEqualStrings("write_float", scalar_text_write_fn(.float));
+    try testing.expectEqualStrings("write_int", scalar_text_write_fn(.int32));
+    try testing.expectEqualStrings("write_int", scalar_text_write_fn(.int64));
+    try testing.expectEqualStrings("write_int", scalar_text_write_fn(.sint32));
+    try testing.expectEqualStrings("write_int", scalar_text_write_fn(.sint64));
+    try testing.expectEqualStrings("write_int", scalar_text_write_fn(.sfixed32));
+    try testing.expectEqualStrings("write_int", scalar_text_write_fn(.sfixed64));
+    try testing.expectEqualStrings("write_uint", scalar_text_write_fn(.uint32));
+    try testing.expectEqualStrings("write_uint", scalar_text_write_fn(.uint64));
+    try testing.expectEqualStrings("write_uint", scalar_text_write_fn(.fixed32));
+    try testing.expectEqualStrings("write_uint", scalar_text_write_fn(.fixed64));
+    try testing.expectEqualStrings("write_bool", scalar_text_write_fn(.bool));
+    try testing.expectEqualStrings("write_string", scalar_text_write_fn(.string));
+    try testing.expectEqualStrings("write_bytes", scalar_text_write_fn(.bytes));
+}
+
+test "scalar_text_read_fn: type mapping" {
+    try testing.expectEqualStrings("read_float64", scalar_text_read_fn(.double));
+    try testing.expectEqualStrings("read_float32", scalar_text_read_fn(.float));
+    try testing.expectEqualStrings("read_int32", scalar_text_read_fn(.int32));
+    try testing.expectEqualStrings("read_int32", scalar_text_read_fn(.sint32));
+    try testing.expectEqualStrings("read_int32", scalar_text_read_fn(.sfixed32));
+    try testing.expectEqualStrings("read_int64", scalar_text_read_fn(.int64));
+    try testing.expectEqualStrings("read_int64", scalar_text_read_fn(.sint64));
+    try testing.expectEqualStrings("read_int64", scalar_text_read_fn(.sfixed64));
+    try testing.expectEqualStrings("read_uint32", scalar_text_read_fn(.uint32));
+    try testing.expectEqualStrings("read_uint32", scalar_text_read_fn(.fixed32));
+    try testing.expectEqualStrings("read_uint64", scalar_text_read_fn(.uint64));
+    try testing.expectEqualStrings("read_uint64", scalar_text_read_fn(.fixed64));
+    try testing.expectEqualStrings("read_bool", scalar_text_read_fn(.bool));
+    try testing.expectEqualStrings("read_string", scalar_text_read_fn(.string));
+    try testing.expectEqualStrings("read_string", scalar_text_read_fn(.bytes));
 }

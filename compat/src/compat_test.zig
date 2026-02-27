@@ -30,8 +30,12 @@ const DefaultMessage = proto.default2.DefaultMessage;
 const DefaultColor = proto.default2.DefaultColor;
 const ExtBase = proto.extension2.ExtBase;
 const GroupMessage = proto.group2.GroupMessage;
+const TextMessage = proto.text3.TextMessage;
+const SubMessage = proto.text3.SubMessage;
+const TextEnum = proto.text3.TextEnum;
 
 const json = @import("protobuf").json;
+const text_format = @import("protobuf").text_format;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -49,6 +53,16 @@ fn encode_to_buf(comptime T: type, msg: T) ![]const u8 {
     var buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try msg.encode(&w);
+    const encoded = w.buffered();
+    const result = try testing.allocator.alloc(u8, encoded.len);
+    @memcpy(result, encoded);
+    return result;
+}
+
+fn text_encode(comptime T: type, msg: T) ![]const u8 {
+    var buf: [65536]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try msg.to_text(&w);
     const encoded = w.buffered();
     const result = try testing.allocator.alloc(u8, encoded.len);
     @memcpy(result, encoded);
@@ -2012,4 +2026,410 @@ test "group2: unknown sgroup field is skipped" {
     try testing.expect(decoded.mygroup == null);
     // The field after should be correctly parsed
     try testing.expectEqual(@as(i32, 99), decoded.after_group.?);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Text Format Serialization Tests
+// ══════════════════════════════════════════════════════════════════════
+
+test "text format: empty message (proto3 defaults skipped)" {
+    const msg = TextMessage{};
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("", text);
+}
+
+test "text format: scalar fields" {
+    const msg = TextMessage{
+        .id = 42,
+        .name = "hello",
+        .active = true,
+        .score = 3.14,
+        .data = "bin",
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "id: 42\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "name: \"hello\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "active: true\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "score: 3.14\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "data: \"bin\"\n") != null);
+}
+
+test "text format: enum field" {
+    const msg = TextMessage{
+        .status = .ALPHA,
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "status: ALPHA\n") != null);
+}
+
+test "text format: message field with indentation" {
+    const msg = TextMessage{
+        .sub = .{ .x = 7, .y = "inner" },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "sub {\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  x: 7\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  y: \"inner\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "}\n") != null);
+}
+
+test "text format: repeated fields" {
+    const msg = TextMessage{
+        .numbers = &[_]i32{ 1, 2, 3 },
+        .labels = &[_][]const u8{ "a", "b" },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    // Repeated fields appear as separate lines with same name
+    try testing.expect(std.mem.indexOf(u8, text, "numbers: 1\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "numbers: 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "numbers: 3\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "labels: \"a\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "labels: \"b\"\n") != null);
+}
+
+test "text format: repeated message fields" {
+    const msg = TextMessage{
+        .items = &[_]SubMessage{
+            .{ .x = 1, .y = "first" },
+            .{ .x = 2, .y = "second" },
+        },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    // Each repeated message is a separate block
+    try testing.expect(std.mem.indexOf(u8, text, "items {\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  x: 1\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  y: \"first\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  x: 2\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  y: \"second\"\n") != null);
+}
+
+test "text format: map entries" {
+    var msg = TextMessage{};
+    var counts = @TypeOf(msg.counts){};
+    try counts.put(testing.allocator, "alpha", 1);
+    try counts.put(testing.allocator, "beta", 2);
+    msg.counts = counts;
+    defer {
+        msg.counts = .empty;
+        counts.deinit(testing.allocator);
+    }
+
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "counts {\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  key: \"alpha\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  value: 1\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  key: \"beta\"\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  value: 2\n") != null);
+}
+
+test "text format: oneof string variant" {
+    const msg = TextMessage{
+        .payload = .{ .text = "oneof_val" },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "text: \"oneof_val\"\n") != null);
+}
+
+test "text format: oneof int variant" {
+    const msg = TextMessage{
+        .payload = .{ .number = 99 },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "number: 99\n") != null);
+}
+
+test "text format: special float inf" {
+    const msg = TextMessage{
+        .score = std.math.inf(f64),
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "score: inf\n") != null);
+}
+
+test "text format: special float -inf" {
+    const msg = TextMessage{
+        .score = -std.math.inf(f64),
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "score: -inf\n") != null);
+}
+
+test "text format: special float nan" {
+    const msg = TextMessage{
+        .score = std.math.nan(f64),
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "score: nan\n") != null);
+}
+
+test "text format: string escaping" {
+    const msg = TextMessage{
+        .name = "hello\nworld\t\"end\"",
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "name: \"hello\\nworld\\t\\\"end\\\"\"\n") != null);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Text Format Round-Trip Tests
+// ══════════════════════════════════════════════════════════════════════
+
+test "text round-trip: empty message" {
+    const msg = TextMessage{};
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 0), decoded.id);
+    try testing.expectEqualStrings("", decoded.name);
+    try testing.expectEqual(false, decoded.active);
+}
+
+test "text round-trip: scalar fields" {
+    const msg = TextMessage{
+        .id = 42,
+        .name = "hello",
+        .active = true,
+        .score = 3.14,
+        .data = "bin",
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 42), decoded.id);
+    try testing.expectEqualStrings("hello", decoded.name);
+    try testing.expectEqual(true, decoded.active);
+    try testing.expectEqual(@as(f64, 3.14), decoded.score);
+    try testing.expectEqualStrings("bin", decoded.data);
+}
+
+test "text round-trip: enum field" {
+    const msg = TextMessage{
+        .status = .BETA,
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(TextEnum.BETA, decoded.status);
+}
+
+test "text round-trip: nested message" {
+    const msg = TextMessage{
+        .sub = .{ .x = 7, .y = "inner" },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.sub != null);
+    try testing.expectEqual(@as(i32, 7), decoded.sub.?.x);
+    try testing.expectEqualStrings("inner", decoded.sub.?.y);
+}
+
+test "text round-trip: repeated fields" {
+    const msg = TextMessage{
+        .numbers = &[_]i32{ 1, 2, 3 },
+        .labels = &[_][]const u8{ "a", "b" },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), decoded.numbers.len);
+    try testing.expectEqual(@as(i32, 1), decoded.numbers[0]);
+    try testing.expectEqual(@as(i32, 2), decoded.numbers[1]);
+    try testing.expectEqual(@as(i32, 3), decoded.numbers[2]);
+    try testing.expectEqual(@as(usize, 2), decoded.labels.len);
+    try testing.expectEqualStrings("a", decoded.labels[0]);
+    try testing.expectEqualStrings("b", decoded.labels[1]);
+}
+
+test "text round-trip: repeated messages" {
+    const msg = TextMessage{
+        .items = &[_]SubMessage{
+            .{ .x = 1, .y = "first" },
+            .{ .x = 2, .y = "second" },
+        },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), decoded.items.len);
+    try testing.expectEqual(@as(i32, 1), decoded.items[0].x);
+    try testing.expectEqualStrings("first", decoded.items[0].y);
+    try testing.expectEqual(@as(i32, 2), decoded.items[1].x);
+    try testing.expectEqualStrings("second", decoded.items[1].y);
+}
+
+test "text round-trip: map entries" {
+    var msg = TextMessage{};
+    var counts = @TypeOf(msg.counts){};
+    try counts.put(testing.allocator, "alpha", 10);
+    try counts.put(testing.allocator, "beta", 20);
+    msg.counts = counts;
+
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    // Must clean up the original
+    counts.deinit(testing.allocator);
+    msg.counts = .empty;
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), decoded.counts.count());
+    try testing.expectEqual(@as(i32, 10), decoded.counts.get("alpha").?);
+    try testing.expectEqual(@as(i32, 20), decoded.counts.get("beta").?);
+}
+
+test "text round-trip: oneof string" {
+    const msg = TextMessage{
+        .payload = .{ .text = "hello" },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.payload != null);
+    try testing.expectEqualStrings("hello", decoded.payload.?.text);
+}
+
+test "text round-trip: oneof int" {
+    const msg = TextMessage{
+        .payload = .{ .number = 77 },
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.payload != null);
+    try testing.expectEqual(@as(i32, 77), decoded.payload.?.number);
+}
+
+test "text round-trip: string with special characters" {
+    const msg = TextMessage{
+        .name = "hello\nworld\t\"end\"\\back",
+    };
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("hello\nworld\t\"end\"\\back", decoded.name);
+}
+
+test "text round-trip: from_text with comments and extra whitespace" {
+    const input =
+        \\# This is a comment
+        \\id: 42
+        \\
+        \\  name: "hello"
+        \\# another comment
+        \\active: true
+        \\
+    ;
+    var decoded = try TextMessage.from_text(testing.allocator, input);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 42), decoded.id);
+    try testing.expectEqualStrings("hello", decoded.name);
+    try testing.expectEqual(true, decoded.active);
+}
+
+test "text round-trip: unknown fields skipped gracefully" {
+    const input =
+        \\id: 42
+        \\unknown_field: "skip me"
+        \\unknown_msg { nested: 1 }
+        \\name: "hello"
+        \\
+    ;
+    var decoded = try TextMessage.from_text(testing.allocator, input);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 42), decoded.id);
+    try testing.expectEqualStrings("hello", decoded.name);
+}
+
+test "text round-trip: fully populated message" {
+    var msg = TextMessage{
+        .id = 100,
+        .name = "full",
+        .active = true,
+        .score = 9.5,
+        .data = "raw",
+        .status = .ALPHA,
+        .sub = .{ .x = 5, .y = "nested" },
+        .numbers = &[_]i32{ 10, 20 },
+        .labels = &[_][]const u8{"tag"},
+        .payload = .{ .text = "choice" },
+        .items = &[_]SubMessage{.{ .x = 3, .y = "item" }},
+    };
+
+    var counts = @TypeOf(msg.counts){};
+    try counts.put(testing.allocator, "k", 1);
+    msg.counts = counts;
+
+    const text = try text_encode(TextMessage, msg);
+    defer testing.allocator.free(text);
+
+    counts.deinit(testing.allocator);
+    msg.counts = .empty;
+
+    var decoded = try TextMessage.from_text(testing.allocator, text);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 100), decoded.id);
+    try testing.expectEqualStrings("full", decoded.name);
+    try testing.expectEqual(true, decoded.active);
+    try testing.expectEqual(@as(f64, 9.5), decoded.score);
+    try testing.expectEqualStrings("raw", decoded.data);
+    try testing.expectEqual(TextEnum.ALPHA, decoded.status);
+    try testing.expectEqual(@as(i32, 5), decoded.sub.?.x);
+    try testing.expectEqualStrings("nested", decoded.sub.?.y);
+    try testing.expectEqual(@as(usize, 2), decoded.numbers.len);
+    try testing.expectEqual(@as(i32, 10), decoded.numbers[0]);
+    try testing.expectEqual(@as(i32, 20), decoded.numbers[1]);
+    try testing.expectEqual(@as(usize, 1), decoded.labels.len);
+    try testing.expectEqualStrings("tag", decoded.labels[0]);
+    try testing.expectEqualStrings("choice", decoded.payload.?.text);
+    try testing.expectEqual(@as(usize, 1), decoded.items.len);
+    try testing.expectEqual(@as(i32, 3), decoded.items[0].x);
+    try testing.expectEqualStrings("item", decoded.items[0].y);
+    try testing.expectEqual(@as(usize, 1), decoded.counts.count());
+    try testing.expectEqual(@as(i32, 1), decoded.counts.get("k").?);
 }
