@@ -71,7 +71,7 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
 
     // Resolve proto source directory
     const src_path = self.proto_sources.getPath3(b, step);
-    var src_dir = src_path.root_dir.handle.openDir(src_path.sub_path, .{}) catch |err| {
+    var src_dir = src_path.root_dir.handle.openDir(src_path.sub_path, .{ .iterate = true }) catch |err| {
         return step.fail("cannot open proto source directory: {s}", .{@errorName(err)});
     };
     defer src_dir.close();
