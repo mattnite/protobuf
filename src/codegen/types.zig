@@ -266,6 +266,21 @@ pub fn scalar_json_value_expr(s: ScalarType, val_expr: []const u8, buf: []u8) []
     };
 }
 
+/// Returns the json.read_* function name for parsing a scalar type from JSON.
+pub fn scalar_json_read_fn(s: ScalarType) []const u8 {
+    return switch (s) {
+        .double => "read_float64",
+        .float => "read_float32",
+        .int32, .sint32, .sfixed32 => "read_int32",
+        .int64, .sint64, .sfixed64 => "read_int64",
+        .uint32, .fixed32 => "read_uint32",
+        .uint64, .fixed64 => "read_uint64",
+        .bool => "read_bool",
+        .string => "read_string",
+        .bytes => "read_bytes",
+    };
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Tests
 // ══════════════════════════════════════════════════════════════════════
@@ -398,4 +413,22 @@ test "scalar_json_write_fn: type mapping" {
     try testing.expectEqualStrings("write_bool", scalar_json_write_fn(.bool));
     try testing.expectEqualStrings("write_string", scalar_json_write_fn(.string));
     try testing.expectEqualStrings("write_bytes", scalar_json_write_fn(.bytes));
+}
+
+test "scalar_json_read_fn: type mapping" {
+    try testing.expectEqualStrings("read_int32", scalar_json_read_fn(.int32));
+    try testing.expectEqualStrings("read_int32", scalar_json_read_fn(.sint32));
+    try testing.expectEqualStrings("read_int32", scalar_json_read_fn(.sfixed32));
+    try testing.expectEqualStrings("read_int64", scalar_json_read_fn(.int64));
+    try testing.expectEqualStrings("read_int64", scalar_json_read_fn(.sint64));
+    try testing.expectEqualStrings("read_int64", scalar_json_read_fn(.sfixed64));
+    try testing.expectEqualStrings("read_uint32", scalar_json_read_fn(.uint32));
+    try testing.expectEqualStrings("read_uint32", scalar_json_read_fn(.fixed32));
+    try testing.expectEqualStrings("read_uint64", scalar_json_read_fn(.uint64));
+    try testing.expectEqualStrings("read_uint64", scalar_json_read_fn(.fixed64));
+    try testing.expectEqualStrings("read_float64", scalar_json_read_fn(.double));
+    try testing.expectEqualStrings("read_float32", scalar_json_read_fn(.float));
+    try testing.expectEqualStrings("read_bool", scalar_json_read_fn(.bool));
+    try testing.expectEqualStrings("read_string", scalar_json_read_fn(.string));
+    try testing.expectEqualStrings("read_bytes", scalar_json_read_fn(.bytes));
 }

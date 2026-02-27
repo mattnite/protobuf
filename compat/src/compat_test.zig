@@ -27,7 +27,19 @@ const AcpMessageKind = proto.acp.AcpMessageKind;
 const AcpStatusCode = proto.acp.AcpStatusCode;
 const AcpAssetMetadata = proto.acp.AcpAssetMetadata;
 
+const json = @import("protobuf").json;
+
 // ── Helpers ───────────────────────────────────────────────────────────
+
+fn json_encode(comptime T: type, msg: T) ![]const u8 {
+    var buf: [65536]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try msg.to_json(&w);
+    const encoded = w.buffered();
+    const result = try testing.allocator.alloc(u8, encoded.len);
+    @memcpy(result, encoded);
+    return result;
+}
 
 fn encode_to_buf(comptime T: type, msg: T) ![]const u8 {
     var buf: [8192]u8 = undefined;
@@ -1470,4 +1482,306 @@ test "acp: write Zig test vectors" {
     };
 
     try write_test_vectors(AcpMessage, &cases, "testdata/zig/acp.bin");
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// JSON Round-Trip Tests
+// ══════════════════════════════════════════════════════════════════════
+
+test "json round-trip: scalar3 all defaults" {
+    const msg = ScalarMessage{};
+    const json_bytes = try json_encode(ScalarMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try ScalarMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(f64, 0), decoded.f_double);
+    try testing.expectEqual(@as(i32, 0), decoded.f_int32);
+    try testing.expectEqual(false, decoded.f_bool);
+    try testing.expectEqualStrings("", decoded.f_string);
+    try testing.expectEqualStrings("", decoded.f_bytes);
+}
+
+test "json round-trip: scalar3 all set" {
+    const msg = ScalarMessage{
+        .f_double = 1.5,
+        .f_float = 2.5,
+        .f_int32 = 42,
+        .f_int64 = 100000,
+        .f_uint32 = 200,
+        .f_uint64 = 300000,
+        .f_sint32 = -10,
+        .f_sint64 = -20000,
+        .f_fixed32 = 999,
+        .f_fixed64 = 888888,
+        .f_sfixed32 = -55,
+        .f_sfixed64 = -66666,
+        .f_bool = true,
+        .f_string = "hello",
+        .f_bytes = "world",
+        .f_large_tag = 77,
+    };
+
+    const json_bytes = try json_encode(ScalarMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try ScalarMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(f64, 1.5), decoded.f_double);
+    try testing.expectEqual(@as(f32, 2.5), decoded.f_float);
+    try testing.expectEqual(@as(i32, 42), decoded.f_int32);
+    try testing.expectEqual(@as(i64, 100000), decoded.f_int64);
+    try testing.expectEqual(@as(u32, 200), decoded.f_uint32);
+    try testing.expectEqual(@as(u64, 300000), decoded.f_uint64);
+    try testing.expectEqual(@as(i32, -10), decoded.f_sint32);
+    try testing.expectEqual(@as(i64, -20000), decoded.f_sint64);
+    try testing.expectEqual(@as(u32, 999), decoded.f_fixed32);
+    try testing.expectEqual(@as(u64, 888888), decoded.f_fixed64);
+    try testing.expectEqual(@as(i32, -55), decoded.f_sfixed32);
+    try testing.expectEqual(@as(i64, -66666), decoded.f_sfixed64);
+    try testing.expectEqual(true, decoded.f_bool);
+    try testing.expectEqualStrings("hello", decoded.f_string);
+    try testing.expectEqualStrings("world", decoded.f_bytes);
+    try testing.expectEqual(@as(i32, 77), decoded.f_large_tag);
+}
+
+test "json round-trip: nested3" {
+    const msg = Outer{
+        .middle = .{
+            .inner = .{
+                .value = 42,
+                .label = "inner_label",
+            },
+            .id = 7,
+        },
+        .direct_inner = .{
+            .value = 99,
+            .label = "direct",
+        },
+        .name = "outer_name",
+    };
+
+    const json_bytes = try json_encode(Outer, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try Outer.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("outer_name", decoded.name);
+    try testing.expect(decoded.middle != null);
+    try testing.expectEqual(@as(i32, 7), decoded.middle.?.id);
+    try testing.expect(decoded.middle.?.inner != null);
+    try testing.expectEqual(@as(i32, 42), decoded.middle.?.inner.?.value);
+    try testing.expectEqualStrings("inner_label", decoded.middle.?.inner.?.label);
+    try testing.expect(decoded.direct_inner != null);
+    try testing.expectEqual(@as(i32, 99), decoded.direct_inner.?.value);
+    try testing.expectEqualStrings("direct", decoded.direct_inner.?.label);
+}
+
+test "json round-trip: enum3" {
+    const msg = EnumMessage{
+        .color = .COLOR_BLUE,
+        .colors = &[_]Color{ .COLOR_RED, .COLOR_GREEN, .COLOR_BLUE },
+        .name = "colorful",
+    };
+
+    const json_bytes = try json_encode(EnumMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try EnumMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(Color.COLOR_BLUE, decoded.color);
+    try testing.expectEqual(@as(usize, 3), decoded.colors.len);
+    try testing.expectEqual(Color.COLOR_RED, decoded.colors[0]);
+    try testing.expectEqual(Color.COLOR_GREEN, decoded.colors[1]);
+    try testing.expectEqual(Color.COLOR_BLUE, decoded.colors[2]);
+    try testing.expectEqualStrings("colorful", decoded.name);
+}
+
+test "json round-trip: oneof3 string variant" {
+    const msg = OneofMessage{
+        .name = "test",
+        .value = .{ .str_val = "hello" },
+    };
+
+    const json_bytes = try json_encode(OneofMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try OneofMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("test", decoded.name);
+    try testing.expect(decoded.value != null);
+    try testing.expectEqualStrings("hello", decoded.value.?.str_val);
+}
+
+test "json round-trip: oneof3 int variant" {
+    const msg = OneofMessage{
+        .name = "int_test",
+        .value = .{ .int_val = 42 },
+    };
+
+    const json_bytes = try json_encode(OneofMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try OneofMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("int_test", decoded.name);
+    try testing.expect(decoded.value != null);
+    try testing.expectEqual(@as(i32, 42), decoded.value.?.int_val);
+}
+
+test "json round-trip: oneof3 message variant" {
+    const msg = OneofMessage{
+        .name = "msg_test",
+        .value = .{ .msg_val = .{ .id = 7, .text = "sub" } },
+    };
+
+    const json_bytes = try json_encode(OneofMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try OneofMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("msg_test", decoded.name);
+    try testing.expect(decoded.value != null);
+    try testing.expectEqual(@as(i32, 7), decoded.value.?.msg_val.id);
+    try testing.expectEqualStrings("sub", decoded.value.?.msg_val.text);
+}
+
+test "json round-trip: repeated3" {
+    const items = [_]RepItem{
+        .{ .id = 1, .name = "a" },
+        .{ .id = 2, .name = "b" },
+    };
+    const msg = RepeatedMessage{
+        .ints = &[_]i32{ 10, 20, 30 },
+        .strings = &[_][]const u8{ "x", "y" },
+        .doubles = &[_]f64{ 1.1, 2.2 },
+        .bools = &[_]bool{ true, false, true },
+        .items = &items,
+    };
+
+    const json_bytes = try json_encode(RepeatedMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try RepeatedMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), decoded.ints.len);
+    try testing.expectEqual(@as(i32, 10), decoded.ints[0]);
+    try testing.expectEqual(@as(i32, 20), decoded.ints[1]);
+    try testing.expectEqual(@as(i32, 30), decoded.ints[2]);
+
+    try testing.expectEqual(@as(usize, 2), decoded.strings.len);
+    try testing.expectEqualStrings("x", decoded.strings[0]);
+    try testing.expectEqualStrings("y", decoded.strings[1]);
+
+    try testing.expectEqual(@as(usize, 2), decoded.doubles.len);
+    try testing.expectEqual(@as(f64, 1.1), decoded.doubles[0]);
+    try testing.expectEqual(@as(f64, 2.2), decoded.doubles[1]);
+
+    try testing.expectEqual(@as(usize, 3), decoded.bools.len);
+    try testing.expectEqual(true, decoded.bools[0]);
+    try testing.expectEqual(false, decoded.bools[1]);
+    try testing.expectEqual(true, decoded.bools[2]);
+
+    try testing.expectEqual(@as(usize, 2), decoded.items.len);
+    try testing.expectEqual(@as(i32, 1), decoded.items[0].id);
+    try testing.expectEqualStrings("a", decoded.items[0].name);
+    try testing.expectEqual(@as(i32, 2), decoded.items[1].id);
+    try testing.expectEqualStrings("b", decoded.items[1].name);
+}
+
+test "json round-trip: map3 string-string" {
+    var msg = MapMessage{};
+    try msg.str_str.put(testing.allocator, "key1", "val1");
+    try msg.str_str.put(testing.allocator, "key2", "val2");
+    defer msg.str_str.deinit(testing.allocator);
+
+    const json_bytes = try json_encode(MapMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try MapMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), decoded.str_str.count());
+    try testing.expectEqualStrings("val1", decoded.str_str.get("key1").?);
+    try testing.expectEqualStrings("val2", decoded.str_str.get("key2").?);
+}
+
+test "json round-trip: map3 int-string" {
+    var msg = MapMessage{};
+    try msg.int_str.put(testing.allocator, 1, "one");
+    try msg.int_str.put(testing.allocator, 2, "two");
+    defer msg.int_str.deinit(testing.allocator);
+
+    const json_bytes = try json_encode(MapMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try MapMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), decoded.int_str.count());
+    try testing.expectEqualStrings("one", decoded.int_str.get(1).?);
+    try testing.expectEqualStrings("two", decoded.int_str.get(2).?);
+}
+
+test "json round-trip: map3 string-message" {
+    var msg = MapMessage{};
+    try msg.str_msg.put(testing.allocator, "a", .{ .id = 1, .text = "first" });
+    defer msg.str_msg.deinit(testing.allocator);
+
+    const json_bytes = try json_encode(MapMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try MapMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 1), decoded.str_msg.count());
+    const val = decoded.str_msg.get("a").?;
+    try testing.expectEqual(@as(i32, 1), val.id);
+    try testing.expectEqualStrings("first", val.text);
+}
+
+test "json round-trip: optional3" {
+    const msg = OptionalMessage{
+        .opt_int = 42,
+        .opt_str = "hello",
+        .opt_bool = true,
+        .opt_double = 3.14,
+        .regular_int = 7,
+    };
+
+    const json_bytes = try json_encode(OptionalMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try OptionalMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 42), decoded.opt_int.?);
+    try testing.expectEqualStrings("hello", decoded.opt_str.?);
+    try testing.expectEqual(true, decoded.opt_bool.?);
+    try testing.expectEqual(@as(f64, 3.14), decoded.opt_double.?);
+    try testing.expectEqual(@as(i32, 7), decoded.regular_int);
+}
+
+test "json round-trip: optional3 nulls" {
+    const msg = OptionalMessage{};
+
+    const json_bytes = try json_encode(OptionalMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try OptionalMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.opt_int == null);
+    try testing.expect(decoded.opt_str == null);
+    try testing.expect(decoded.opt_bool == null);
+    try testing.expect(decoded.opt_double == null);
+    try testing.expectEqual(@as(i32, 0), decoded.regular_int);
 }
