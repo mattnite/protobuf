@@ -281,6 +281,111 @@ pub fn scalar_json_read_fn(s: ScalarType) []const u8 {
     };
 }
 
+/// Scans field options for a "default" option and returns the Constant value.
+pub fn extract_default(options: []const ast.FieldOption) ?ast.Constant {
+    for (options) |opt| {
+        if (opt.name.parts.len == 1 and !opt.name.parts[0].is_extension and std.mem.eql(u8, opt.name.parts[0].name, "default")) {
+            return opt.value;
+        }
+    }
+    return null;
+}
+
+/// Writes a Zig literal for a Constant + ScalarType pair into buf.
+/// Returns the slice of buf that was written.
+pub fn emit_default_literal(constant: ast.Constant, scalar: ScalarType, buf: []u8) []const u8 {
+    switch (constant) {
+        .integer => |n| {
+            return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
+        },
+        .unsigned_integer => |n| {
+            return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
+        },
+        .float_value => |f| {
+            return std.fmt.bufPrint(buf, "{d}", .{f}) catch unreachable;
+        },
+        .bool_value => |b| {
+            return if (b) "true" else "false";
+        },
+        .string_value => |s| {
+            return emit_zig_string_literal(s, buf);
+        },
+        .identifier => |id| {
+            // Special float identifiers
+            if (std.ascii.eqlIgnoreCase(id, "inf") or std.ascii.eqlIgnoreCase(id, "infinity")) {
+                return switch (scalar) {
+                    .float => "std.math.inf(f32)",
+                    else => "std.math.inf(f64)",
+                };
+            }
+            if (std.ascii.eqlIgnoreCase(id, "nan")) {
+                return switch (scalar) {
+                    .float => "std.math.nan(f32)",
+                    else => "std.math.nan(f64)",
+                };
+            }
+            if (std.mem.eql(u8, id, "true")) return "true";
+            if (std.mem.eql(u8, id, "false")) return "false";
+            // Enum value identifier
+            return std.fmt.bufPrint(buf, ".{s}", .{id}) catch unreachable;
+        },
+        .aggregate => return "undefined",
+    }
+}
+
+/// Emits a Zig string literal with proper escaping.
+fn emit_zig_string_literal(s: []const u8, buf: []u8) []const u8 {
+    var len: usize = 0;
+    buf[len] = '"';
+    len += 1;
+    for (s) |c| {
+        switch (c) {
+            '\\' => {
+                buf[len] = '\\';
+                buf[len + 1] = '\\';
+                len += 2;
+            },
+            '"' => {
+                buf[len] = '\\';
+                buf[len + 1] = '"';
+                len += 2;
+            },
+            '\n' => {
+                buf[len] = '\\';
+                buf[len + 1] = 'n';
+                len += 2;
+            },
+            '\r' => {
+                buf[len] = '\\';
+                buf[len + 1] = 'r';
+                len += 2;
+            },
+            '\t' => {
+                buf[len] = '\\';
+                buf[len + 1] = 't';
+                len += 2;
+            },
+            else => {
+                if (c < 0x20 or c >= 0x7F) {
+                    // Non-printable: emit as \xHH
+                    buf[len] = '\\';
+                    buf[len + 1] = 'x';
+                    const hex = "0123456789abcdef";
+                    buf[len + 2] = hex[c >> 4];
+                    buf[len + 3] = hex[c & 0x0F];
+                    len += 4;
+                } else {
+                    buf[len] = c;
+                    len += 1;
+                }
+            },
+        }
+    }
+    buf[len] = '"';
+    len += 1;
+    return buf[0..len];
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Tests
 // ══════════════════════════════════════════════════════════════════════
@@ -431,4 +536,65 @@ test "scalar_json_read_fn: type mapping" {
     try testing.expectEqualStrings("read_bool", scalar_json_read_fn(.bool));
     try testing.expectEqualStrings("read_string", scalar_json_read_fn(.string));
     try testing.expectEqualStrings("read_bytes", scalar_json_read_fn(.bytes));
+}
+
+test "extract_default: finds default option" {
+    var parts = [_]ast.OptionName.Part{.{ .name = "default", .is_extension = false }};
+    var opts = [_]ast.FieldOption{.{
+        .name = .{ .parts = &parts },
+        .value = .{ .integer = 42 },
+    }};
+    const result = extract_default(&opts);
+    try testing.expect(result != null);
+    try testing.expectEqual(@as(i64, 42), result.?.integer);
+}
+
+test "extract_default: returns null when not present" {
+    const result = extract_default(&.{});
+    try testing.expect(result == null);
+}
+
+test "emit_default_literal: integer" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("42", emit_default_literal(.{ .integer = 42 }, .int32, &buf));
+    try testing.expectEqualStrings("-1", emit_default_literal(.{ .integer = -1 }, .int32, &buf));
+}
+
+test "emit_default_literal: float" {
+    var buf: [64]u8 = undefined;
+    const result = emit_default_literal(.{ .float_value = 3.14 }, .double, &buf);
+    // Just check it doesn't crash and produces something
+    try testing.expect(result.len > 0);
+}
+
+test "emit_default_literal: bool" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("true", emit_default_literal(.{ .bool_value = true }, .bool, &buf));
+    try testing.expectEqualStrings("false", emit_default_literal(.{ .bool_value = false }, .bool, &buf));
+}
+
+test "emit_default_literal: string" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("\"hello\"", emit_default_literal(.{ .string_value = "hello" }, .string, &buf));
+}
+
+test "emit_default_literal: string with escapes" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("\"a\\\"b\"", emit_default_literal(.{ .string_value = "a\"b" }, .string, &buf));
+}
+
+test "emit_default_literal: identifier inf" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("std.math.inf(f64)", emit_default_literal(.{ .identifier = "inf" }, .double, &buf));
+    try testing.expectEqualStrings("std.math.inf(f32)", emit_default_literal(.{ .identifier = "inf" }, .float, &buf));
+}
+
+test "emit_default_literal: identifier nan" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("std.math.nan(f64)", emit_default_literal(.{ .identifier = "nan" }, .double, &buf));
+}
+
+test "emit_default_literal: enum identifier" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings(".GREEN", emit_default_literal(.{ .identifier = "GREEN" }, .int32, &buf));
 }

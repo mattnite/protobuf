@@ -26,6 +26,10 @@ const AcpMessage = proto.acp.AcpMessage;
 const AcpMessageKind = proto.acp.AcpMessageKind;
 const AcpStatusCode = proto.acp.AcpStatusCode;
 const AcpAssetMetadata = proto.acp.AcpAssetMetadata;
+const DefaultMessage = proto.default2.DefaultMessage;
+const DefaultColor = proto.default2.DefaultColor;
+const ExtBase = proto.extension2.ExtBase;
+const GroupMessage = proto.group2.GroupMessage;
 
 const json = @import("protobuf").json;
 
@@ -1784,4 +1788,228 @@ test "json round-trip: optional3 nulls" {
     try testing.expect(decoded.opt_bool == null);
     try testing.expect(decoded.opt_double == null);
     try testing.expectEqual(@as(i32, 0), decoded.regular_int);
+}
+
+// ── Default2 Tests ────────────────────────────────────────────────────
+
+test "default2: getters return custom defaults when null" {
+    const msg = DefaultMessage{};
+    // Getters should return custom defaults
+    try testing.expectEqual(@as(i32, 42), msg.get_opt_int());
+    try testing.expectEqualStrings("hello", msg.get_opt_string());
+    try testing.expectEqual(true, msg.get_opt_bool());
+    try testing.expectEqual(@as(f32, 3.14), msg.get_opt_float());
+    try testing.expectEqual(@as(f64, 2.718), msg.get_opt_double());
+    try testing.expectEqualStrings("raw", msg.get_opt_bytes());
+    try testing.expectEqual(DefaultColor.GREEN, msg.get_opt_color());
+    try testing.expectEqual(@as(i32, -10), msg.get_opt_sint());
+    try testing.expectEqual(@as(u64, 1000000), msg.get_opt_uint64());
+    // opt_no_default has no getter
+}
+
+test "default2: required fields have custom defaults" {
+    const msg = DefaultMessage{};
+    try testing.expectEqual(@as(i32, 99), msg.req_with_default);
+    try testing.expectEqual(DefaultColor.BLUE, msg.req_color);
+}
+
+test "default2: getters return set values when present" {
+    var msg = DefaultMessage{};
+    msg.opt_int = 7;
+    msg.opt_string = "world";
+    msg.opt_bool = false;
+    msg.opt_color = .RED;
+    try testing.expectEqual(@as(i32, 7), msg.get_opt_int());
+    try testing.expectEqualStrings("world", msg.get_opt_string());
+    try testing.expectEqual(false, msg.get_opt_bool());
+    try testing.expectEqual(DefaultColor.RED, msg.get_opt_color());
+}
+
+test "default2: wire round-trip preserves set values" {
+    var msg = DefaultMessage{};
+    msg.opt_int = 7;
+    msg.opt_string = "world";
+    msg.opt_bool = false;
+    msg.opt_float = 1.0;
+    msg.opt_color = .RED;
+    msg.req_with_default = 55;
+    msg.req_color = .GREEN;
+
+    const data = try encode_to_buf(DefaultMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(DefaultMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 7), decoded.get_opt_int());
+    try testing.expectEqualStrings("world", decoded.get_opt_string());
+    try testing.expectEqual(false, decoded.get_opt_bool());
+    try testing.expectEqual(@as(f32, 1.0), decoded.get_opt_float());
+    try testing.expectEqual(DefaultColor.RED, decoded.get_opt_color());
+    try testing.expectEqual(@as(i32, 55), decoded.req_with_default);
+    try testing.expectEqual(DefaultColor.GREEN, decoded.req_color);
+}
+
+test "default2: json round-trip" {
+    var msg = DefaultMessage{};
+    msg.opt_int = 7;
+    msg.req_with_default = 55;
+    msg.req_color = .GREEN;
+
+    const json_bytes = try json_encode(DefaultMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try DefaultMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    // Set values preserved
+    try testing.expectEqual(@as(i32, 7), decoded.get_opt_int());
+    try testing.expectEqual(@as(i32, 55), decoded.req_with_default);
+    try testing.expectEqual(DefaultColor.GREEN, decoded.req_color);
+    // Null fields still get defaults from getters
+    try testing.expect(decoded.opt_string == null);
+    try testing.expectEqualStrings("hello", decoded.get_opt_string());
+}
+
+// ── Extension2 Tests ──────────────────────────────────────────────────
+
+test "extension2: extension fields appear on struct" {
+    var msg = ExtBase{};
+    msg.id = 1;
+    msg.name = "test";
+    msg.ext_value = 42;
+    msg.ext_label = "ext";
+    msg.ext_flag = true;
+
+    try testing.expectEqual(@as(i32, 1), msg.id);
+    try testing.expectEqual(@as(i32, 42), msg.ext_value.?);
+    try testing.expectEqualStrings("ext", msg.ext_label.?);
+    try testing.expectEqual(true, msg.ext_flag.?);
+}
+
+test "extension2: wire round-trip" {
+    var msg = ExtBase{};
+    msg.id = 10;
+    msg.name = "base";
+    msg.ext_value = 77;
+    msg.ext_label = "hello";
+    msg.ext_flag = true;
+
+    const data = try encode_to_buf(ExtBase, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(ExtBase, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 10), decoded.id);
+    try testing.expectEqualStrings("base", decoded.name.?);
+    try testing.expectEqual(@as(i32, 77), decoded.ext_value.?);
+    try testing.expectEqualStrings("hello", decoded.ext_label.?);
+    try testing.expectEqual(true, decoded.ext_flag.?);
+}
+
+test "extension2: json round-trip" {
+    var msg = ExtBase{};
+    msg.id = 5;
+    msg.ext_value = 99;
+    msg.ext_flag = true;
+
+    const json_bytes = try json_encode(ExtBase, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try ExtBase.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(i32, 5), decoded.id);
+    try testing.expectEqual(@as(i32, 99), decoded.ext_value.?);
+    try testing.expectEqual(true, decoded.ext_flag.?);
+}
+
+// ── Group2 Tests ──────────────────────────────────────────────────────
+
+test "group2: wire round-trip with group fields set" {
+    var msg = GroupMessage{};
+    msg.mygroup = .{ .value = 42, .label = "hello" };
+    msg.after_group = 99;
+
+    const data = try encode_to_buf(GroupMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(GroupMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.mygroup != null);
+    try testing.expectEqual(@as(i32, 42), decoded.mygroup.?.value.?);
+    try testing.expectEqualStrings("hello", decoded.mygroup.?.label.?);
+    try testing.expectEqual(@as(i32, 99), decoded.after_group.?);
+}
+
+test "group2: wire format uses sgroup/egroup tags" {
+    var msg = GroupMessage{};
+    msg.mygroup = .{ .value = 1 };
+
+    const data = try encode_to_buf(GroupMessage, msg);
+    defer testing.allocator.free(data);
+
+    // sgroup tag for field 1: (1 << 3) | 3 = 0x0B
+    // egroup tag for field 1: (1 << 3) | 4 = 0x0C
+    // Check that first byte is sgroup tag
+    try testing.expectEqual(@as(u8, 0x0B), data[0]);
+    // Check that last byte is egroup tag
+    try testing.expectEqual(@as(u8, 0x0C), data[data.len - 1]);
+}
+
+test "group2: json round-trip" {
+    var msg = GroupMessage{};
+    msg.mygroup = .{ .value = 42, .label = "world" };
+    msg.after_group = 7;
+
+    const json_bytes = try json_encode(GroupMessage, msg);
+    defer testing.allocator.free(json_bytes);
+
+    var decoded = try GroupMessage.from_json(testing.allocator, json_bytes);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.mygroup != null);
+    try testing.expectEqual(@as(i32, 42), decoded.mygroup.?.value.?);
+    try testing.expectEqualStrings("world", decoded.mygroup.?.label.?);
+    try testing.expectEqual(@as(i32, 7), decoded.after_group.?);
+}
+
+test "group2: null group round-trip" {
+    const msg = GroupMessage{};
+
+    const data = try encode_to_buf(GroupMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(GroupMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.mygroup == null);
+    try testing.expect(decoded.after_group == null);
+}
+
+test "group2: unknown sgroup field is skipped" {
+    // Build a message manually with an unknown group field (field 10)
+    // followed by a known field (after_group = 4)
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const mw = message.MessageWriter.init(&w);
+
+    // Unknown sgroup field 10
+    try mw.write_sgroup_field(10);
+    // Inner: field 11 varint 42
+    try mw.write_varint_field(11, 42);
+    // Matching egroup field 10
+    try mw.write_egroup_field(10);
+    // Known field: after_group (field 4) = 99
+    try mw.write_varint_field(4, 99);
+
+    var decoded = try decode_msg(GroupMessage, w.buffered());
+    defer decoded.deinit(testing.allocator);
+
+    // The unknown group should be skipped
+    try testing.expect(decoded.mygroup == null);
+    // The field after should be correctly parsed
+    try testing.expectEqual(@as(i32, 99), decoded.after_group.?);
 }
