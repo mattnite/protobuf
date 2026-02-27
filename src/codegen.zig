@@ -40,6 +40,7 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
     try e.print("const message = protobuf.message;\n", .{});
     if (file.messages.len > 0) {
         try e.print("const json = protobuf.json;\n", .{});
+        try e.print("const text_format = protobuf.text_format;\n", .{});
     }
     try e.blank_line();
 

@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+message TextMessage {
+    int32 id = 1;
+    string name = 2;
+    bool active = 3;
+    double score = 4;
+    bytes data = 5;
+    TextEnum status = 6;
+    SubMessage sub = 7;
+    repeated int32 numbers = 8;
+    repeated string labels = 9;
+    map<string, int32> counts = 10;
+    oneof payload {
+        string text = 11;
+        int32 number = 12;
+    }
+    repeated SubMessage items = 13;
+}
+
+enum TextEnum {
+    UNKNOWN = 0;
+    ALPHA = 1;
+    BETA = 2;
+}
+
+message SubMessage {
+    int32 x = 1;
+    string y = 2;
+}

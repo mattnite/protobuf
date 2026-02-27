@@ -91,6 +91,10 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) std.mem.A
     try emit_to_json_method(e, msg, syntax);
     try e.blank_line();
     try emit_from_json_method(e, msg, syntax);
+    try e.blank_line();
+    try emit_to_text_method(e, msg, syntax);
+    try e.blank_line();
+    try emit_from_text_method(e, msg, syntax);
 
     try e.close_brace();
 }
@@ -233,6 +237,12 @@ fn emit_group_struct(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
     try emit_group_to_json_method(e, group, syntax);
     try e.blank_line();
     try emit_group_from_json_method(e, group, syntax);
+
+    // Text format methods
+    try e.blank_line();
+    try emit_group_to_text_method(e, group);
+    try e.blank_line();
+    try emit_group_from_text_method(e, group);
 
     try e.close_brace();
 }
@@ -2426,6 +2436,872 @@ fn emit_from_json_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.O
 
     e.indent_level -= 1;
     try e.print("}}", .{});
+}
+
+// ── Text Format Serialization Method ─────────────────────────────────
+
+fn emit_to_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    try e.print("pub fn to_text(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+    try e.print("return self.to_text_indent(writer, 0);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    try e.print("pub fn to_text_indent(self: @This(), writer: *std.Io.Writer, indent: usize) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+
+    const items = try collect_all_fields(e.allocator, msg);
+    defer e.allocator.free(items);
+
+    for (items) |item| {
+        switch (item) {
+            .field => |f| try emit_text_field(e, f, syntax),
+            .map => |m| try emit_text_map(e, m),
+            .oneof => |o| try emit_text_oneof(e, o),
+            .group => |g| try emit_text_group(e, g),
+        }
+    }
+
+    try e.close_brace_nosemi();
+}
+
+fn emit_text_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
+    const escaped = types.escape_zig_keyword(field.name);
+    _ = syntax;
+
+    switch (field.type_name) {
+        .scalar => |s| {
+            const write_fn = types.scalar_text_write_fn(s);
+            switch (field.label) {
+                .implicit => {
+                    // Proto3 implicit: skip if default
+                    if (s == .string or s == .bytes) {
+                        try e.print("if (self.{f}.len > 0)", .{escaped});
+                        try e.open_brace();
+                        try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                        try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                        try e.print("try text_format.{s}(writer, self.{f});\n", .{ write_fn, escaped });
+                        try e.print("try writer.writeByte('\\n');\n", .{});
+                        try e.close_brace_nosemi();
+                    } else if (s == .bool) {
+                        try e.print("if (self.{f})", .{escaped});
+                        try e.open_brace();
+                        try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                        try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                        try e.print("try text_format.write_bool(writer, self.{f});\n", .{escaped});
+                        try e.print("try writer.writeByte('\\n');\n", .{});
+                        try e.close_brace_nosemi();
+                    } else if (s == .double or s == .float) {
+                        try e.print("if (self.{f} != 0)", .{escaped});
+                        try e.open_brace();
+                        try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                        try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                        try e.print("try text_format.write_float(writer, self.{f});\n", .{escaped});
+                        try e.print("try writer.writeByte('\\n');\n", .{});
+                        try e.close_brace_nosemi();
+                    } else {
+                        // integer types
+                        try e.print("if (self.{f} != 0)", .{escaped});
+                        try e.open_brace();
+                        try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                        try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                        try emit_text_scalar_write(e, write_fn, s, escaped);
+                        try e.print("try writer.writeByte('\\n');\n", .{});
+                        try e.close_brace_nosemi();
+                    }
+                },
+                .optional => {
+                    try e.print("if (self.{f}) |v|", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try emit_text_scalar_write_val(e, write_fn, s);
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .required => {
+                    try e.print("{{\n", .{});
+                    e.indent_level += 1;
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try emit_text_scalar_write(e, write_fn, s, escaped);
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
+                },
+                .repeated => {
+                    try e.print("for (self.{f}) |item|", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try emit_text_scalar_write_item(e, write_fn, s);
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    try e.close_brace_nosemi();
+                },
+            }
+        },
+        .named => {
+            switch (field.label) {
+                .repeated => {
+                    try e.print("for (self.{f}) |item|", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field.name});
+                    try e.print("try item.to_text_indent(writer, indent + 1);\n", .{});
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .optional, .implicit => {
+                    try e.print("if (self.{f}) |sub|", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field.name});
+                    try e.print("try sub.to_text_indent(writer, indent + 1);\n", .{});
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .required => {
+                    try e.print("{{\n", .{});
+                    e.indent_level += 1;
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field.name});
+                    try e.print("try self.{f}.to_text_indent(writer, indent + 1);\n", .{escaped});
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
+                },
+            }
+        },
+        .enum_ref => {
+            switch (field.label) {
+                .implicit => {
+                    try e.print("if (@intFromEnum(self.{f}) != 0)", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try e.print("try text_format.write_enum_name(writer, @tagName(self.{f}));\n", .{escaped});
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .optional => {
+                    try e.print("if (self.{f}) |v|", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try e.print("try text_format.write_enum_name(writer, @tagName(v));\n", .{});
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .required => {
+                    try e.print("{{\n", .{});
+                    e.indent_level += 1;
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try e.print("try text_format.write_enum_name(writer, @tagName(self.{f}));\n", .{escaped});
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
+                },
+                .repeated => {
+                    try e.print("for (self.{f}) |item|", .{escaped});
+                    try e.open_brace();
+                    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                    try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                    try e.print("try text_format.write_enum_name(writer, @tagName(item));\n", .{});
+                    try e.print("try writer.writeByte('\\n');\n", .{});
+                    try e.close_brace_nosemi();
+                },
+            }
+        },
+    }
+}
+
+fn emit_text_scalar_write(e: *Emitter, write_fn: []const u8, s: ast.ScalarType, escaped: types.EscapedName) !void {
+    switch (s) {
+        .int32, .sint32, .sfixed32 => {
+            try e.print("try text_format.{s}(writer, @as(i64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .int64, .sint64, .sfixed64 => {
+            try e.print("try text_format.{s}(writer, @as(i64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .uint32, .fixed32 => {
+            try e.print("try text_format.{s}(writer, @as(u64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .uint64, .fixed64 => {
+            try e.print("try text_format.{s}(writer, @as(u64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .double, .float, .bool, .string, .bytes => {
+            try e.print("try text_format.{s}(writer, self.{f});\n", .{ write_fn, escaped });
+        },
+    }
+}
+
+fn emit_text_scalar_write_val(e: *Emitter, write_fn: []const u8, s: ast.ScalarType) !void {
+    switch (s) {
+        .int32, .sint32, .sfixed32 => {
+            try e.print("try text_format.{s}(writer, @as(i64, v));\n", .{write_fn});
+        },
+        .int64, .sint64, .sfixed64 => {
+            try e.print("try text_format.{s}(writer, @as(i64, v));\n", .{write_fn});
+        },
+        .uint32, .fixed32 => {
+            try e.print("try text_format.{s}(writer, @as(u64, v));\n", .{write_fn});
+        },
+        .uint64, .fixed64 => {
+            try e.print("try text_format.{s}(writer, @as(u64, v));\n", .{write_fn});
+        },
+        .double, .float, .bool, .string, .bytes => {
+            try e.print("try text_format.{s}(writer, v);\n", .{write_fn});
+        },
+    }
+}
+
+fn emit_text_scalar_write_item(e: *Emitter, write_fn: []const u8, s: ast.ScalarType) !void {
+    switch (s) {
+        .int32, .sint32, .sfixed32 => {
+            try e.print("try text_format.{s}(writer, @as(i64, item));\n", .{write_fn});
+        },
+        .int64, .sint64, .sfixed64 => {
+            try e.print("try text_format.{s}(writer, @as(i64, item));\n", .{write_fn});
+        },
+        .uint32, .fixed32 => {
+            try e.print("try text_format.{s}(writer, @as(u64, item));\n", .{write_fn});
+        },
+        .uint64, .fixed64 => {
+            try e.print("try text_format.{s}(writer, @as(u64, item));\n", .{write_fn});
+        },
+        .double, .float, .bool, .string, .bytes => {
+            try e.print("try text_format.{s}(writer, item);\n", .{write_fn});
+        },
+    }
+}
+
+fn emit_text_map(e: *Emitter, map_field: ast.MapField) !void {
+    const escaped = types.escape_zig_keyword(map_field.name);
+
+    try e.print("for (self.{f}.keys(), self.{f}.values()) |key, val|", .{ escaped, escaped });
+    try e.open_brace();
+    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+    try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{map_field.name});
+
+    // Write key
+    try e.print("try text_format.write_indent(writer, indent + 1);\n", .{});
+    try e.print("try writer.writeAll(\"key: \");\n", .{});
+    if (types.is_string_key(map_field.key_type)) {
+        try e.print("try text_format.write_string(writer, key);\n", .{});
+    } else if (map_field.key_type == .bool) {
+        try e.print("try text_format.write_bool(writer, key);\n", .{});
+    } else {
+        const write_fn = types.scalar_text_write_fn(map_field.key_type);
+        switch (map_field.key_type) {
+            .int32, .sint32, .sfixed32 => {
+                try e.print("try text_format.{s}(writer, @as(i64, key));\n", .{write_fn});
+            },
+            .int64, .sint64, .sfixed64 => {
+                try e.print("try text_format.{s}(writer, @as(i64, key));\n", .{write_fn});
+            },
+            .uint32, .fixed32 => {
+                try e.print("try text_format.{s}(writer, @as(u64, key));\n", .{write_fn});
+            },
+            .uint64, .fixed64 => {
+                try e.print("try text_format.{s}(writer, @as(u64, key));\n", .{write_fn});
+            },
+            else => {
+                try e.print("try text_format.{s}(writer, key);\n", .{write_fn});
+            },
+        }
+    }
+    try e.print("try writer.writeByte('\\n');\n", .{});
+
+    // Write value
+    try e.print("try text_format.write_indent(writer, indent + 1);\n", .{});
+    switch (map_field.value_type) {
+        .scalar => |s| {
+            const write_fn = types.scalar_text_write_fn(s);
+            try e.print("try writer.writeAll(\"value: \");\n", .{});
+            switch (s) {
+                .int32, .sint32, .sfixed32 => {
+                    try e.print("try text_format.{s}(writer, @as(i64, val));\n", .{write_fn});
+                },
+                .int64, .sint64, .sfixed64 => {
+                    try e.print("try text_format.{s}(writer, @as(i64, val));\n", .{write_fn});
+                },
+                .uint32, .fixed32 => {
+                    try e.print("try text_format.{s}(writer, @as(u64, val));\n", .{write_fn});
+                },
+                .uint64, .fixed64 => {
+                    try e.print("try text_format.{s}(writer, @as(u64, val));\n", .{write_fn});
+                },
+                .double, .float, .bool, .string, .bytes => {
+                    try e.print("try text_format.{s}(writer, val);\n", .{write_fn});
+                },
+            }
+            try e.print("try writer.writeByte('\\n');\n", .{});
+        },
+        .named => {
+            try e.print("try writer.writeAll(\"value {{\\n\");\n", .{});
+            try e.print("try val.to_text_indent(writer, indent + 2);\n", .{});
+            try e.print("try text_format.write_indent(writer, indent + 1);\n", .{});
+            try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+        },
+        .enum_ref => {
+            try e.print("try writer.writeAll(\"value: \");\n", .{});
+            try e.print("try text_format.write_enum_name(writer, @tagName(val));\n", .{});
+            try e.print("try writer.writeByte('\\n');\n", .{});
+        },
+    }
+
+    try e.print("try text_format.write_indent(writer, indent);\n", .{});
+    try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+    try e.close_brace_nosemi();
+}
+
+fn emit_text_oneof(e: *Emitter, oneof: ast.Oneof) !void {
+    const escaped = types.escape_zig_keyword(oneof.name);
+    try e.print("if (self.{f}) |oneof_val| switch (oneof_val)", .{escaped});
+    try e.open_brace();
+    for (oneof.fields) |field| {
+        const field_escaped = types.escape_zig_keyword(field.name);
+
+        switch (field.type_name) {
+            .scalar => |s| {
+                const write_fn = types.scalar_text_write_fn(s);
+                try e.print(".{f} => |v|", .{field_escaped});
+                try e.open_brace();
+                try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                switch (s) {
+                    .int32, .sint32, .sfixed32 => {
+                        try e.print("try text_format.{s}(writer, @as(i64, v));\n", .{write_fn});
+                    },
+                    .int64, .sint64, .sfixed64 => {
+                        try e.print("try text_format.{s}(writer, @as(i64, v));\n", .{write_fn});
+                    },
+                    .uint32, .fixed32 => {
+                        try e.print("try text_format.{s}(writer, @as(u64, v));\n", .{write_fn});
+                    },
+                    .uint64, .fixed64 => {
+                        try e.print("try text_format.{s}(writer, @as(u64, v));\n", .{write_fn});
+                    },
+                    .double, .float, .bool, .string, .bytes => {
+                        try e.print("try text_format.{s}(writer, v);\n", .{write_fn});
+                    },
+                }
+                try e.print("try writer.writeByte('\\n');\n", .{});
+                try e.close_brace_comma();
+            },
+            .named => {
+                try e.print(".{f} => |sub|", .{field_escaped});
+                try e.open_brace();
+                try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field.name});
+                try e.print("try sub.to_text_indent(writer, indent + 1);\n", .{});
+                try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+                try e.close_brace_comma();
+            },
+            .enum_ref => {
+                try e.print(".{f} => |v|", .{field_escaped});
+                try e.open_brace();
+                try e.print("try text_format.write_indent(writer, indent);\n", .{});
+                try e.print("try writer.writeAll(\"{s}: \");\n", .{field.name});
+                try e.print("try text_format.write_enum_name(writer, @tagName(v));\n", .{});
+                try e.print("try writer.writeByte('\\n');\n", .{});
+                try e.close_brace_comma();
+            },
+        }
+    }
+    try e.close_brace();
+}
+
+fn emit_text_group(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+
+    switch (grp.label) {
+        .optional, .implicit => {
+            try e.print("if (self.{f}) |grp|", .{escaped});
+            try e.open_brace();
+            try e.print("try text_format.write_indent(writer, indent);\n", .{});
+            try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field_name});
+            try e.print("try grp.to_text_indent(writer, indent + 1);\n", .{});
+            try e.print("try text_format.write_indent(writer, indent);\n", .{});
+            try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+            try e.close_brace_nosemi();
+        },
+        .required => {
+            try e.print("{{\n", .{});
+            e.indent_level += 1;
+            try e.print("try text_format.write_indent(writer, indent);\n", .{});
+            try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field_name});
+            try e.print("try self.{f}.to_text_indent(writer, indent + 1);\n", .{escaped});
+            try e.print("try text_format.write_indent(writer, indent);\n", .{});
+            try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+            e.indent_level -= 1;
+            try e.print("}}\n", .{});
+        },
+        .repeated => {
+            try e.print("for (self.{f}) |item|", .{escaped});
+            try e.open_brace();
+            try e.print("try text_format.write_indent(writer, indent);\n", .{});
+            try e.print("try writer.writeAll(\"{s} {{\\n\");\n", .{field_name});
+            try e.print("try item.to_text_indent(writer, indent + 1);\n", .{});
+            try e.print("try text_format.write_indent(writer, indent);\n", .{});
+            try e.print("try writer.writeAll(\"}}\\n\");\n", .{});
+            try e.close_brace_nosemi();
+        },
+    }
+}
+
+fn emit_group_to_text_method(e: *Emitter, group: ast.Group) !void {
+    try e.print("pub fn to_text(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+    try e.print("return self.to_text_indent(writer, 0);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    try e.print("pub fn to_text_indent(self: @This(), writer: *std.Io.Writer, indent: usize) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+    for (group.fields) |field| {
+        try emit_text_field(e, field, .proto2);
+    }
+    try e.close_brace_nosemi();
+}
+
+// ── Text Format Deserialization Method ──────────────────────────────────
+
+fn emit_from_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    _ = syntax;
+
+    // from_text entry point
+    try e.print("pub fn from_text(allocator: std.mem.Allocator, text: []const u8) !@This()", .{});
+    try e.open_brace();
+    try e.print("var scanner = text_format.TextScanner.init(allocator, text);\n", .{});
+    try e.print("defer scanner.deinit();\n", .{});
+    try e.print("return try @This().from_text_scanner(allocator, &scanner);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_text_scanner
+    try e.print("pub fn from_text_scanner(allocator: std.mem.Allocator, scanner: *text_format.TextScanner) !@This()", .{});
+    try e.open_brace();
+    try e.print("var result: @This() = .{{}};\n", .{});
+
+    // Loop over tokens
+    try e.print("while (try scanner.peek()) |tok|", .{});
+    try e.open_brace();
+    try e.print("switch (tok)", .{});
+    try e.open_brace();
+    try e.print(".close_brace => return result,\n", .{});
+    try e.print(".identifier => |field_name|", .{});
+    try e.open_brace();
+    try e.print("_ = try scanner.next();\n", .{}); // consume the identifier
+
+    // Collect all fields for the if/else if chain
+    const items = try collect_all_fields(e.allocator, msg);
+    defer e.allocator.free(items);
+
+    var first_branch = true;
+    for (items) |item| {
+        switch (item) {
+            .field => |f| try emit_from_text_field_branch(e, f, &first_branch),
+            .map => |m| try emit_from_text_map_branch(e, m, &first_branch),
+            .oneof => |o| {
+                for (o.fields) |f| {
+                    try emit_from_text_oneof_field_branch(e, f, o, &first_branch);
+                }
+            },
+            .group => |g| try emit_from_text_group_branch(e, g, &first_branch),
+        }
+    }
+
+    // else: skip unknown field
+    if (first_branch) {
+        try e.print("try text_format.skip_field(scanner);\n", .{});
+    } else {
+        try e.print(" else {{\n", .{});
+        e.indent_level += 1;
+        try e.print("try text_format.skip_field(scanner);\n", .{});
+        e.indent_level -= 1;
+        try e.print("}}\n", .{});
+    }
+
+    try e.close_brace_comma(); // .identifier => |field_name| { ... },
+    try e.print("else => return error.UnexpectedToken,\n", .{});
+    try e.close_brace_nosemi(); // switch
+    try e.close_brace_nosemi(); // while
+    try e.print("return result;\n", .{});
+    try e.close_brace_nosemi(); // fn
+}
+
+fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *bool) !void {
+    const escaped = types.escape_zig_keyword(field.name);
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, field_name, \"{s}\"))", .{field.name});
+    try e.open_brace();
+
+    switch (field.type_name) {
+        .scalar => |s| {
+            const read_fn = types.scalar_text_read_fn(s);
+            switch (field.label) {
+                .implicit, .optional, .required => {
+                    try e.print("try scanner.expect_colon();\n", .{});
+                    if (s == .string or s == .bytes) {
+                        try e.print("result.{f} = try allocator.dupe(u8, try text_format.{s}(scanner));\n", .{ escaped, read_fn });
+                    } else {
+                        try e.print("result.{f} = try text_format.{s}(scanner);\n", .{ escaped, read_fn });
+                    }
+                },
+                .repeated => {
+                    try emit_from_text_repeated_scalar(e, escaped, s, read_fn);
+                },
+            }
+        },
+        .named => |name| {
+            switch (field.label) {
+                .implicit, .optional, .required => {
+                    // Text format allows optional colon before message blocks
+                    try emit_text_consume_optional_colon(e);
+                    try e.print("try scanner.expect_open_brace();\n", .{});
+                    try e.print("result.{f} = try {s}.from_text_scanner(allocator, scanner);\n", .{ escaped, name });
+                    try e.print("try scanner.expect_close_brace();\n", .{});
+                },
+                .repeated => {
+                    try emit_from_text_repeated_named(e, escaped, name);
+                },
+            }
+        },
+        .enum_ref => {
+            switch (field.label) {
+                .implicit, .optional, .required => {
+                    try e.print("try scanner.expect_colon();\n", .{});
+                    try e.print("const enum_name = try text_format.read_enum_name(scanner);\n", .{});
+                    try e.print("result.{f} = std.meta.stringToEnum(@TypeOf(result.{f}), enum_name) orelse @enumFromInt(0);\n", .{ escaped, escaped });
+                },
+                .repeated => {
+                    try emit_from_text_repeated_enum(e, escaped);
+                },
+            }
+        },
+    }
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
+fn emit_text_consume_optional_colon(e: *Emitter) !void {
+    try e.print("if (try scanner.peek()) |maybe_colon| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (maybe_colon == .colon) {{ _ = try scanner.next(); }}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+}
+
+fn emit_from_text_repeated_scalar(e: *Emitter, escaped: types.EscapedName, s: ast.ScalarType, read_fn: []const u8) !void {
+    try e.print("try scanner.expect_colon();\n", .{});
+    try e.print("{{\n", .{});
+    e.indent_level += 1;
+    try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{types.scalar_zig_type(s)});
+    try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
+    try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
+    if (s == .string or s == .bytes) {
+        try e.print("try list.append(allocator, try allocator.dupe(u8, try text_format.{s}(scanner)));\n", .{read_fn});
+    } else {
+        try e.print("try list.append(allocator, try text_format.{s}(scanner));\n", .{read_fn});
+    }
+    try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+}
+
+fn emit_from_text_repeated_named(e: *Emitter, escaped: types.EscapedName, name: []const u8) !void {
+    try emit_text_consume_optional_colon_static(e);
+    try e.print("try scanner.expect_open_brace();\n", .{});
+    try e.print("{{\n", .{});
+    e.indent_level += 1;
+    try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
+    try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
+    try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
+    try e.print("try list.append(allocator, try {s}.from_text_scanner(allocator, scanner));\n", .{name});
+    try e.print("try scanner.expect_close_brace();\n", .{});
+    try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+}
+
+fn emit_from_text_repeated_enum(e: *Emitter, escaped: types.EscapedName) !void {
+    try e.print("try scanner.expect_colon();\n", .{});
+    try e.print("const enum_name = try text_format.read_enum_name(scanner);\n", .{});
+    try e.print("{{\n", .{});
+    e.indent_level += 1;
+    try e.print("var list: std.ArrayListUnmanaged(@TypeOf(result.{f}[0])) = .empty;\n", .{escaped});
+    try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
+    try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
+    try e.print("try list.append(allocator, std.meta.stringToEnum(@TypeOf(result.{f}[0]), enum_name) orelse @enumFromInt(0));\n", .{escaped});
+    try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+}
+
+fn emit_text_consume_optional_colon_static(e: *Emitter) !void {
+    try e.print("if (try scanner.peek()) |maybe_colon| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (maybe_colon == .colon) {{ _ = try scanner.next(); }}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+}
+
+fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch: *bool) !void {
+    const escaped = types.escape_zig_keyword(map_field.name);
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, field_name, \"{s}\"))", .{map_field.name});
+    try e.open_brace();
+
+    // Expect open brace for the map entry
+    try emit_text_consume_optional_colon_static(e);
+    try e.print("try scanner.expect_open_brace();\n", .{});
+
+    // Initialize key/value as optionals
+    const key_zig_type = types.scalar_zig_type(map_field.key_type);
+    try e.print("var map_key: ?{s} = null;\n", .{key_zig_type});
+
+    const value_zig_type = switch (map_field.value_type) {
+        .scalar => |s| types.scalar_zig_type(s),
+        .named => |n| n,
+        .enum_ref => |n| n,
+    };
+    try e.print("var map_val: ?{s} = null;\n", .{value_zig_type});
+
+    // Loop inside map entry
+    try e.print("while (try scanner.peek()) |entry_tok|", .{});
+    try e.open_brace();
+    try e.print("switch (entry_tok)", .{});
+    try e.open_brace();
+    try e.print(".close_brace => {{ _ = try scanner.next(); break; }},\n", .{});
+    try e.print(".identifier => |entry_name|", .{});
+    try e.open_brace();
+    try e.print("_ = try scanner.next();\n", .{});
+
+    // key branch
+    try e.print("if (std.mem.eql(u8, entry_name, \"key\"))", .{});
+    try e.open_brace();
+    try e.print("try scanner.expect_colon();\n", .{});
+    if (types.is_string_key(map_field.key_type)) {
+        try e.print("map_key = try allocator.dupe(u8, try text_format.read_string(scanner));\n", .{});
+    } else if (map_field.key_type == .bool) {
+        try e.print("map_key = try text_format.read_bool(scanner);\n", .{});
+    } else {
+        const read_fn = types.scalar_text_read_fn(map_field.key_type);
+        try e.print("map_key = try text_format.{s}(scanner);\n", .{read_fn});
+    }
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+
+    // value branch
+    try e.print_raw(" else if (std.mem.eql(u8, entry_name, \"value\"))", .{});
+    try e.open_brace();
+    switch (map_field.value_type) {
+        .scalar => |s| {
+            const read_fn = types.scalar_text_read_fn(s);
+            try e.print("try scanner.expect_colon();\n", .{});
+            if (s == .string or s == .bytes) {
+                try e.print("map_val = try allocator.dupe(u8, try text_format.{s}(scanner));\n", .{read_fn});
+            } else {
+                try e.print("map_val = try text_format.{s}(scanner);\n", .{read_fn});
+            }
+        },
+        .named => |name| {
+            try emit_text_consume_optional_colon_static(e);
+            try e.print("try scanner.expect_open_brace();\n", .{});
+            try e.print("map_val = try {s}.from_text_scanner(allocator, scanner);\n", .{name});
+            try e.print("try scanner.expect_close_brace();\n", .{});
+        },
+        .enum_ref => {
+            try e.print("try scanner.expect_colon();\n", .{});
+            try e.print("const enum_name = try text_format.read_enum_name(scanner);\n", .{});
+            try e.print("map_val = std.meta.stringToEnum({s}, enum_name) orelse @enumFromInt(0);\n", .{value_zig_type});
+        },
+    }
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+
+    // else: skip unknown entry field
+    try e.print_raw(" else {{\n", .{});
+    e.indent_level += 1;
+    try e.print("try text_format.skip_field(scanner);\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+
+    try e.close_brace_comma(); // .identifier
+    try e.print("else => return error.UnexpectedToken,\n", .{});
+    try e.close_brace_nosemi(); // switch
+    try e.close_brace_nosemi(); // while
+
+    // Put key/value into map
+    try e.print("if (map_key) |k| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("try result.{f}.put(allocator, k, map_val orelse ", .{escaped});
+    // Default value for map values
+    switch (map_field.value_type) {
+        .scalar => |s| try e.print_raw("{s}", .{types.scalar_default_value(s)}),
+        .named => try e.print_raw("undefined", .{}),
+        .enum_ref => try e.print_raw("@enumFromInt(0)", .{}),
+    }
+    try e.print_raw(");\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
+fn emit_from_text_group_branch(e: *Emitter, grp: ast.Group, first_branch: *bool) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, field_name, \"{s}\"))", .{field_name});
+    try e.open_brace();
+
+    switch (grp.label) {
+        .optional, .implicit, .required => {
+            try emit_text_consume_optional_colon_static(e);
+            try e.print("try scanner.expect_open_brace();\n", .{});
+            try e.print("result.{f} = try {s}.from_text_scanner(allocator, scanner);\n", .{ escaped, grp.name });
+            try e.print("try scanner.expect_close_brace();\n", .{});
+        },
+        .repeated => {
+            try emit_text_consume_optional_colon_static(e);
+            try e.print("try scanner.expect_open_brace();\n", .{});
+            try e.print("{{\n", .{});
+            e.indent_level += 1;
+            try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{grp.name});
+            try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
+            try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
+            try e.print("try list.append(allocator, try {s}.from_text_scanner(allocator, scanner));\n", .{grp.name});
+            try e.print("try scanner.expect_close_brace();\n", .{});
+            try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+            e.indent_level -= 1;
+            try e.print("}}\n", .{});
+        },
+    }
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
+fn emit_from_text_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.Oneof, first_branch: *bool) !void {
+    const field_escaped = types.escape_zig_keyword(field.name);
+    const oneof_escaped = types.escape_zig_keyword(oneof.name);
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, field_name, \"{s}\"))", .{field.name});
+    try e.open_brace();
+
+    switch (field.type_name) {
+        .scalar => |s| {
+            const read_fn = types.scalar_text_read_fn(s);
+            try e.print("try scanner.expect_colon();\n", .{});
+            if (s == .string or s == .bytes) {
+                try e.print("result.{f} = .{{ .{f} = try allocator.dupe(u8, try text_format.{s}(scanner)) }};\n", .{ oneof_escaped, field_escaped, read_fn });
+            } else {
+                try e.print("result.{f} = .{{ .{f} = try text_format.{s}(scanner) }};\n", .{ oneof_escaped, field_escaped, read_fn });
+            }
+        },
+        .named => |name| {
+            try emit_text_consume_optional_colon_static(e);
+            try e.print("try scanner.expect_open_brace();\n", .{});
+            try e.print("result.{f} = .{{ .{f} = try {s}.from_text_scanner(allocator, scanner) }};\n", .{ oneof_escaped, field_escaped, name });
+            try e.print("try scanner.expect_close_brace();\n", .{});
+        },
+        .enum_ref => {
+            try e.print("try scanner.expect_colon();\n", .{});
+            try e.print("const enum_name = try text_format.read_enum_name(scanner);\n", .{});
+            try e.print("result.{f} = .{{ .{f} = std.meta.stringToEnum(@TypeOf(result.{f}.?.{f}), enum_name) orelse @enumFromInt(0) }};\n", .{ oneof_escaped, field_escaped, oneof_escaped, field_escaped });
+        },
+    }
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
+fn emit_group_from_text_method(e: *Emitter, group: ast.Group) !void {
+    // from_text entry point
+    try e.print("pub fn from_text(allocator: std.mem.Allocator, text: []const u8) !@This()", .{});
+    try e.open_brace();
+    try e.print("var scanner = text_format.TextScanner.init(allocator, text);\n", .{});
+    try e.print("defer scanner.deinit();\n", .{});
+    try e.print("return try @This().from_text_scanner(allocator, &scanner);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_text_scanner
+    try e.print("pub fn from_text_scanner(allocator: std.mem.Allocator, scanner: *text_format.TextScanner) !@This()", .{});
+    try e.open_brace();
+    try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("while (try scanner.peek()) |tok|", .{});
+    try e.open_brace();
+    try e.print("switch (tok)", .{});
+    try e.open_brace();
+    try e.print(".close_brace => return result,\n", .{});
+    try e.print(".identifier => |field_name|", .{});
+    try e.open_brace();
+    try e.print("_ = try scanner.next();\n", .{});
+
+    // Field matching
+    var first_branch = true;
+    for (group.fields) |field| {
+        try emit_from_text_field_branch(e, field, &first_branch);
+    }
+
+    // else: skip unknown
+    if (first_branch) {
+        try e.print("try text_format.skip_field(scanner);\n", .{});
+    } else {
+        try e.print(" else {{\n", .{});
+        e.indent_level += 1;
+        try e.print("try text_format.skip_field(scanner);\n", .{});
+        e.indent_level -= 1;
+        try e.print("}}\n", .{});
+    }
+
+    try e.close_brace_comma(); // .identifier
+    try e.print("else => return error.UnexpectedToken,\n", .{});
+    try e.close_brace_nosemi(); // switch
+    try e.close_brace_nosemi(); // while
+    try e.print("return result;\n", .{});
+    try e.close_brace_nosemi(); // fn
 }
 
 // ── Field Collection Helper ───────────────────────────────────────────
