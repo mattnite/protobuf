@@ -874,3 +874,12 @@ test "integration: empty message round-trip" {
     var iter = iterate_fields("");
     try testing.expectEqual(@as(?Field, null), try iter.next());
 }
+
+test "fuzz: FieldIterator handles arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var iter = iterate_fields(input);
+            while (iter.next() catch return) |_| {}
+        }
+    }.run, .{});
+}

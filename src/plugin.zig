@@ -41,7 +41,7 @@ const EnumOptions = struct {
 };
 
 const FieldOptions = struct {
-    // Currently no fields needed; placeholder for future use.
+    @"packed": ?bool = null,
 };
 
 const EnumValueDescriptorProto = struct {
@@ -270,9 +270,21 @@ fn decode_field(data: []const u8) DecodeError!FieldDescriptorProto {
             5 => result.@"type" = varint_as_i32(field.value.varint),
             6 => result.type_name = field.value.len,
             7 => result.default_value = field.value.len,
-            8 => {}, // options submessage — skip for now
+            8 => result.options = try decode_field_options(field.value.len),
             9 => result.oneof_index = varint_as_i32(field.value.varint),
             10 => result.json_name = field.value.len,
+            else => {},
+        }
+    }
+    return result;
+}
+
+fn decode_field_options(data: []const u8) DecodeError!FieldOptions {
+    var result: FieldOptions = .{};
+    var iter = message.iterate_fields(data);
+    while (try iter.next()) |field| {
+        switch (field.number) {
+            2 => result.@"packed" = varint_as_bool(field.value.varint),
             else => {},
         }
     }
@@ -577,18 +589,27 @@ fn convert_message(allocator: std.mem.Allocator, desc: DescriptorProto, package:
             };
         };
 
-        // Build field options (default value)
-        var field_options: []ast.FieldOption = &.{};
+        // Build field options (default value + packed)
+        var field_opts_list: std.ArrayListUnmanaged(ast.FieldOption) = .empty;
         if (f.default_value.len > 0) {
-            const opts = try allocator.alloc(ast.FieldOption, 1);
             const parts = try allocator.alloc(ast.OptionName.Part, 1);
             parts[0] = .{ .name = "default", .is_extension = false };
-            opts[0] = .{
+            try field_opts_list.append(allocator, .{
                 .name = .{ .parts = parts },
                 .value = .{ .string_value = f.default_value },
-            };
-            field_options = opts;
+            });
         }
+        if (f.options) |opts| {
+            if (opts.@"packed") |is_packed| {
+                const parts = try allocator.alloc(ast.OptionName.Part, 1);
+                parts[0] = .{ .name = "packed", .is_extension = false };
+                try field_opts_list.append(allocator, .{
+                    .name = .{ .parts = parts },
+                    .value = .{ .bool_value = is_packed },
+                });
+            }
+        }
+        const field_options = try field_opts_list.toOwnedSlice(allocator);
 
         const ast_field = ast.Field{
             .name = f.name,

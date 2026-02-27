@@ -905,3 +905,13 @@ test "read_float64: integer token" {
     defer s.deinit();
     try testing.expectEqual(@as(f64, 42.0), try read_float64(&s));
 }
+
+test "fuzz: TextScanner handles arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var scanner = TextScanner.init(std.testing.allocator, input);
+            defer scanner.deinit();
+            while (scanner.next() catch return) |_| {}
+        }
+    }.run, .{});
+}

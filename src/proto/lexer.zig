@@ -736,3 +736,15 @@ test "resolve_string: mixed escapes" {
     defer testing.allocator.free(result);
     try testing.expectEqualStrings("hello\nA\"world", result);
 }
+
+test "fuzz: Lexer handles arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var lex = Lexer.init(input, "fuzz.proto");
+            while (true) {
+                const tok = lex.next() catch return;
+                if (tok.kind == .eof) break;
+            }
+        }
+    }.run, .{});
+}

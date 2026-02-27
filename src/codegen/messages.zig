@@ -776,12 +776,15 @@ fn emit_encode_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try emit_encode_scalar_value(e, "v", s, write_method, num);
                 },
                 .required => {
-                    _ = syntax;
                     try emit_encode_scalar_self(e, escaped, s, write_method, num);
                 },
                 .repeated => {
-                    try e.print("for (self.{f}) |item| ", .{escaped});
-                    try emit_encode_scalar_value(e, "item", s, write_method, num);
+                    if (types.is_packed(field, syntax)) {
+                        try emit_encode_packed_scalar(e, escaped, s, num);
+                    } else {
+                        try e.print("for (self.{f}) |item| ", .{escaped});
+                        try emit_encode_scalar_value(e, "item", s, write_method, num);
+                    }
                 },
             }
         },
@@ -827,7 +830,11 @@ fn emit_encode_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try e.print("try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(self.{f})))));\n", .{ num, escaped });
                 },
                 .repeated => {
-                    try e.print("for (self.{f}) |item| try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{ escaped, num });
+                    if (types.is_packed(field, syntax)) {
+                        try emit_encode_packed_enum(e, escaped, num);
+                    } else {
+                        try e.print("for (self.{f}) |item| try mw.write_varint_field({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{ escaped, num });
+                    }
                 },
             }
         },
@@ -891,6 +898,39 @@ fn emit_encode_scalar_self(e: *Emitter, escaped: types.EscapedName, s: ast.Scala
             try e.print("try mw.{s}({d}, @bitCast(self.{f}));\n", .{ write_method, num, escaped });
         },
     }
+}
+
+fn emit_encode_packed_scalar(e: *Emitter, escaped: types.EscapedName, s: ast.ScalarType, num: i32) !void {
+    try e.print("if (self.{f}.len > 0)", .{escaped});
+    try e.open_brace();
+    const cat = types.scalar_packed_category(s);
+    switch (cat) {
+        .varint => {
+            try e.print("var packed_size: usize = 0;\n", .{});
+            try e.print("for (self.{f}) |item| packed_size += {s};\n", .{ escaped, types.scalar_packed_varint_size_expr(s) });
+            try e.print("try mw.write_len_prefix({d}, packed_size);\n", .{num});
+            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_encode_expr(s) });
+        },
+        .fixed32 => {
+            try e.print("try mw.write_len_prefix({d}, self.{f}.len * 4);\n", .{ num, escaped });
+            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_encode_expr(s) });
+        },
+        .fixed64 => {
+            try e.print("try mw.write_len_prefix({d}, self.{f}.len * 8);\n", .{ num, escaped });
+            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_encode_expr(s) });
+        },
+    }
+    try e.close_brace_nosemi();
+}
+
+fn emit_encode_packed_enum(e: *Emitter, escaped: types.EscapedName, num: i32) !void {
+    try e.print("if (self.{f}.len > 0)", .{escaped});
+    try e.open_brace();
+    try e.print("var packed_size: usize = 0;\n", .{});
+    try e.print("for (self.{f}) |item| packed_size += encoding.varint_size(@as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{escaped});
+    try e.print("try mw.write_len_prefix({d}, packed_size);\n", .{num});
+    try e.print("for (self.{f}) |item| try encoding.encode_varint(writer, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{escaped});
+    try e.close_brace_nosemi();
 }
 
 fn scalar_value_conversion(s: ast.ScalarType, val: []const u8) []const u8 {
@@ -1165,20 +1205,23 @@ fn emit_size_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try emit_size_scalar_optional(e, s, size_fn, field.number);
                 },
                 .required => {
-                    _ = syntax;
                     try emit_size_scalar_required(e, escaped, s, size_fn, field.number);
                 },
                 .repeated => {
-                    const needs_value = switch (s) {
-                        .double, .float, .fixed32, .sfixed32, .fixed64, .sfixed64 => false,
-                        else => true,
-                    };
-                    if (needs_value) {
-                        try e.print("for (self.{f}) |item| ", .{escaped});
+                    if (types.is_packed(field, syntax)) {
+                        try emit_size_packed_scalar(e, escaped, s, field.number);
                     } else {
-                        try e.print("for (self.{f}) |_| ", .{escaped});
+                        const needs_value = switch (s) {
+                            .double, .float, .fixed32, .sfixed32, .fixed64, .sfixed64 => false,
+                            else => true,
+                        };
+                        if (needs_value) {
+                            try e.print("for (self.{f}) |item| ", .{escaped});
+                        } else {
+                            try e.print("for (self.{f}) |_| ", .{escaped});
+                        }
+                        try emit_size_scalar_repeated(e, s, size_fn, field.number);
                     }
-                    try emit_size_scalar_repeated(e, s, size_fn, field.number);
                 },
             }
         },
@@ -1207,7 +1250,11 @@ fn emit_size_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
                     try e.print("size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(self.{f})))));\n", .{ field.number, escaped });
                 },
                 .repeated => {
-                    try e.print("for (self.{f}) |item| size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{ escaped, field.number });
+                    if (types.is_packed(field, syntax)) {
+                        try emit_size_packed_enum(e, escaped, field.number);
+                    } else {
+                        try e.print("for (self.{f}) |item| size += message.varint_field_size({d}, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{ escaped, field.number });
+                    }
                 },
             }
         },
@@ -1284,6 +1331,35 @@ fn emit_size_scalar_repeated(e: *Emitter, s: ast.ScalarType, size_fn: []const u8
         .sint32 => try e.print_raw("size += message.{s}({d}, @as(u64, encoding.zigzag_encode(item)));\n", .{ size_fn, num }),
         .sint64 => try e.print_raw("size += message.{s}({d}, encoding.zigzag_encode_64(item));\n", .{ size_fn, num }),
     }
+}
+
+fn emit_size_packed_scalar(e: *Emitter, escaped: types.EscapedName, s: ast.ScalarType, num: i32) !void {
+    try e.print("if (self.{f}.len > 0)", .{escaped});
+    try e.open_brace();
+    const cat = types.scalar_packed_category(s);
+    switch (cat) {
+        .varint => {
+            try e.print("var packed_size: usize = 0;\n", .{});
+            try e.print("for (self.{f}) |item| packed_size += {s};\n", .{ escaped, types.scalar_packed_varint_size_expr(s) });
+            try e.print("size += message.len_field_size({d}, packed_size);\n", .{num});
+        },
+        .fixed32 => {
+            try e.print("size += message.len_field_size({d}, self.{f}.len * 4);\n", .{ num, escaped });
+        },
+        .fixed64 => {
+            try e.print("size += message.len_field_size({d}, self.{f}.len * 8);\n", .{ num, escaped });
+        },
+    }
+    try e.close_brace_nosemi();
+}
+
+fn emit_size_packed_enum(e: *Emitter, escaped: types.EscapedName, num: i32) !void {
+    try e.print("if (self.{f}.len > 0)", .{escaped});
+    try e.open_brace();
+    try e.print("var packed_size: usize = 0;\n", .{});
+    try e.print("for (self.{f}) |item| packed_size += encoding.varint_size(@as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{escaped});
+    try e.print("size += message.len_field_size({d}, packed_size);\n", .{num});
+    try e.close_brace_nosemi();
 }
 
 fn emit_size_map(e: *Emitter, map_field: ast.MapField) !void {
