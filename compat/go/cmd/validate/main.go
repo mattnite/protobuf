@@ -24,6 +24,7 @@ func main() {
 	failures += validateFile(zigDir, "edge3", validateEdge3)
 	failures += validateFile(zigDir, "scalar2", validateScalar2)
 	failures += validateFile(zigDir, "required2", validateRequired2)
+	failures += validateFile(zigDir, "acp", validateAcp)
 
 	if failures > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d validation failure(s)\n", failures)
@@ -338,6 +339,72 @@ func validateRequired2(cases []testcases.RawTestCase) int {
 			failures += check(tc.Name, "req_name", msg.ReqName != nil && *msg.ReqName == "min")
 			failures += check(tc.Name, "opt_value", msg.OptValue == nil)
 			failures += check(tc.Name, "opt_label", msg.OptLabel == nil)
+		}
+	}
+	return failures
+}
+
+func validateAcp(cases []testcases.RawTestCase) int {
+	failures := 0
+	for _, tc := range cases {
+		msg := &pb.AcpMessage{}
+		if err := proto.Unmarshal(tc.Data, msg); err != nil {
+			fmt.Printf("  FAIL %s: unmarshal: %v\n", tc.Name, err)
+			failures++
+			continue
+		}
+
+		switch tc.Name {
+		case "empty":
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_HELLO)
+			failures += check(tc.Name, "request_id", msg.RequestId == 0)
+		case "hello":
+			failures += check(tc.Name, "version", msg.Version != nil && *msg.Version == 1)
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_HELLO)
+		case "request_with_uri":
+			failures += check(tc.Name, "version", msg.Version != nil && *msg.Version == 1)
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_REQUEST)
+			failures += check(tc.Name, "request_id", msg.RequestId == 42)
+			failures += check(tc.Name, "uri", msg.Uri != nil && *msg.Uri == "asset://textures/wood.png")
+		case "discover_with_uris":
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_DISCOVER)
+			failures += check(tc.Name, "request_id", msg.RequestId == 100)
+			failures += check(tc.Name, "uris.len", len(msg.Uris) == 3)
+			if len(msg.Uris) == 3 {
+				failures += check(tc.Name, "uris[0]", msg.Uris[0] == "asset://models/tree.glb")
+				failures += check(tc.Name, "uris[1]", msg.Uris[1] == "asset://textures/bark.png")
+				failures += check(tc.Name, "uris[2]", msg.Uris[2] == "asset://shaders/pbr.wgsl")
+			}
+		case "status_ok_with_metadata":
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_STATUS)
+			failures += check(tc.Name, "status", msg.Status != nil && *msg.Status == pb.AcpStatusCode_OK)
+			failures += check(tc.Name, "metadata", msg.Metadata != nil)
+			if msg.Metadata != nil {
+				failures += check(tc.Name, "metadata.uri", msg.Metadata.Uri == "asset://textures/wood.png")
+				failures += check(tc.Name, "metadata.cache_path", msg.Metadata.CachePath == "/tmp/cache/abc123")
+				failures += check(tc.Name, "metadata.payload_hash", msg.Metadata.PayloadHash == "sha256:deadbeef")
+				failures += check(tc.Name, "metadata.file_length", msg.Metadata.FileLength == 1048576)
+				failures += check(tc.Name, "metadata.uri_version", msg.Metadata.UriVersion == 3)
+				failures += check(tc.Name, "metadata.updated_at_ns", msg.Metadata.UpdatedAtNs == 1700000000000000000)
+			}
+		case "status_not_found":
+			failures += check(tc.Name, "status", msg.Status != nil && *msg.Status == pb.AcpStatusCode_NOT_FOUND)
+			failures += check(tc.Name, "detail", msg.Detail != nil && *msg.Detail == "asset not found in registry")
+		case "updated_with_chunks":
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_UPDATED)
+			failures += check(tc.Name, "chunk_index", msg.ChunkIndex == 3)
+			failures += check(tc.Name, "chunk_total", msg.ChunkTotal == 10)
+			failures += check(tc.Name, "metadata", msg.Metadata != nil)
+		case "force_recook":
+			failures += check(tc.Name, "version", msg.Version != nil && *msg.Version == 2)
+			failures += check(tc.Name, "force_recook", msg.ForceRecook != nil && *msg.ForceRecook == true)
+			failures += check(tc.Name, "uri", msg.Uri != nil && *msg.Uri == "asset://textures/grass.png")
+		case "all_status_codes":
+			failures += check(tc.Name, "status", msg.Status != nil && *msg.Status == pb.AcpStatusCode_INTERNAL_ERROR)
+			failures += check(tc.Name, "detail", msg.Detail != nil && *msg.Detail == "unexpected codec failure")
+		case "deload":
+			failures += check(tc.Name, "kind", msg.Kind == pb.AcpMessageKind_DELOAD)
+			failures += check(tc.Name, "uris.len", len(msg.Uris) == 1)
 		}
 	}
 	return failures

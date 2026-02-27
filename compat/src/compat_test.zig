@@ -6,22 +6,26 @@ const encoding = @import("protobuf").encoding;
 const framing = @import("framing.zig");
 
 // Each proto file generates its own module (no shared package)
-const ScalarMessage = proto.@"scalar3".ScalarMessage;
-const Inner = proto.@"nested3".Inner;
-const Middle = proto.@"nested3".Middle;
-const Outer = proto.@"nested3".Outer;
-const Color = proto.@"enum3".Color;
-const EnumMessage = proto.@"enum3".EnumMessage;
-const OneofMessage = proto.@"oneof3".OneofMessage;
-const SubMsg = proto.@"oneof3".SubMsg;
-const RepeatedMessage = proto.@"repeated3".RepeatedMessage;
-const RepItem = proto.@"repeated3".RepItem;
-const MapMessage = proto.@"map3".MapMessage;
-const MapSubMsg = proto.@"map3".MapSubMsg;
-const OptionalMessage = proto.@"optional3".OptionalMessage;
-const EdgeMessage = proto.@"edge3".EdgeMessage;
-const Scalar2Message = proto.@"scalar2".Scalar2Message;
-const Required2Message = proto.@"required2".Required2Message;
+const ScalarMessage = proto.scalar3.ScalarMessage;
+const Inner = proto.nested3.Inner;
+const Middle = proto.nested3.Middle;
+const Outer = proto.nested3.Outer;
+const Color = proto.enum3.Color;
+const EnumMessage = proto.enum3.EnumMessage;
+const OneofMessage = proto.oneof3.OneofMessage;
+const SubMsg = proto.oneof3.SubMsg;
+const RepeatedMessage = proto.repeated3.RepeatedMessage;
+const RepItem = proto.repeated3.RepItem;
+const MapMessage = proto.map3.MapMessage;
+const MapSubMsg = proto.map3.MapSubMsg;
+const OptionalMessage = proto.optional3.OptionalMessage;
+const EdgeMessage = proto.edge3.EdgeMessage;
+const Scalar2Message = proto.scalar2.Scalar2Message;
+const Required2Message = proto.required2.Required2Message;
+const AcpMessage = proto.acp.AcpMessage;
+const AcpMessageKind = proto.acp.AcpMessageKind;
+const AcpStatusCode = proto.acp.AcpStatusCode;
+const AcpAssetMetadata = proto.acp.AcpAssetMetadata;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -835,4 +839,268 @@ test "required2: write Zig test vectors" {
     };
 
     try write_test_vectors(Required2Message, &cases, "testdata/zig/required2.bin");
+}
+
+// ── ACP Tests ─────────────────────────────────────────────────────────
+
+test "acp: encode/decode round-trip - empty" {
+    const msg = AcpMessage{};
+    const data = try encode_to_buf(AcpMessage, msg);
+    defer testing.allocator.free(data);
+
+    try testing.expectEqual(@as(usize, 0), data.len);
+
+    var decoded = try decode_msg(AcpMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, null), decoded.version);
+    try testing.expectEqual(@as(AcpMessageKind, @enumFromInt(0)), decoded.kind);
+    try testing.expectEqual(@as(u64, 0), decoded.request_id);
+    try testing.expectEqual(@as(?[]const u8, null), decoded.uri);
+}
+
+test "acp: encode/decode round-trip - hello" {
+    const msg = AcpMessage{
+        .version = 1,
+        .kind = .HELLO,
+    };
+    const data = try encode_to_buf(AcpMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(AcpMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, 1), decoded.version);
+    try testing.expectEqual(AcpMessageKind.HELLO, decoded.kind);
+}
+
+test "acp: encode/decode round-trip - request_with_uri" {
+    const msg = AcpMessage{
+        .version = 1,
+        .kind = .REQUEST,
+        .request_id = 42,
+        .uri = "asset://textures/wood.png",
+    };
+    const data = try encode_to_buf(AcpMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(AcpMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, 1), decoded.version);
+    try testing.expectEqual(AcpMessageKind.REQUEST, decoded.kind);
+    try testing.expectEqual(@as(u64, 42), decoded.request_id);
+    try testing.expectEqualStrings("asset://textures/wood.png", decoded.uri.?);
+}
+
+test "acp: encode/decode round-trip - discover_with_uris" {
+    const uris = &[_][]const u8{
+        "asset://models/tree.glb",
+        "asset://textures/bark.png",
+        "asset://shaders/pbr.wgsl",
+    };
+    const msg = AcpMessage{
+        .kind = .DISCOVER,
+        .request_id = 100,
+        .uris = uris,
+    };
+    const data = try encode_to_buf(AcpMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(AcpMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(AcpMessageKind.DISCOVER, decoded.kind);
+    try testing.expectEqual(@as(u64, 100), decoded.request_id);
+    try testing.expectEqual(@as(usize, 3), decoded.uris.len);
+    try testing.expectEqualStrings("asset://models/tree.glb", decoded.uris[0]);
+    try testing.expectEqualStrings("asset://textures/bark.png", decoded.uris[1]);
+    try testing.expectEqualStrings("asset://shaders/pbr.wgsl", decoded.uris[2]);
+}
+
+test "acp: encode/decode round-trip - status_ok_with_metadata" {
+    const msg = AcpMessage{
+        .kind = .STATUS,
+        .request_id = 7,
+        .status = .OK,
+        .metadata = .{
+            .uri = "asset://textures/wood.png",
+            .cache_path = "/tmp/cache/abc123",
+            .payload_hash = "sha256:deadbeef",
+            .file_length = 1048576,
+            .uri_version = 3,
+            .updated_at_ns = 1700000000000000000,
+        },
+    };
+    const data = try encode_to_buf(AcpMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(AcpMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(AcpMessageKind.STATUS, decoded.kind);
+    try testing.expectEqual(@as(u64, 7), decoded.request_id);
+    try testing.expectEqual(@as(?AcpStatusCode, .OK), decoded.status);
+    try testing.expect(decoded.metadata != null);
+    try testing.expectEqualStrings("asset://textures/wood.png", decoded.metadata.?.uri);
+    try testing.expectEqualStrings("/tmp/cache/abc123", decoded.metadata.?.cache_path);
+    try testing.expectEqualStrings("sha256:deadbeef", decoded.metadata.?.payload_hash);
+    try testing.expectEqual(@as(i64, 1048576), decoded.metadata.?.file_length);
+    try testing.expectEqual(@as(i64, 3), decoded.metadata.?.uri_version);
+    try testing.expectEqual(@as(i64, 1700000000000000000), decoded.metadata.?.updated_at_ns);
+}
+
+test "acp: encode/decode round-trip - force_recook" {
+    const msg = AcpMessage{
+        .version = 2,
+        .kind = .REQUEST,
+        .request_id = 99,
+        .uri = "asset://textures/grass.png",
+        .force_recook = true,
+    };
+    const data = try encode_to_buf(AcpMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(AcpMessage, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, 2), decoded.version);
+    try testing.expectEqual(AcpMessageKind.REQUEST, decoded.kind);
+    try testing.expectEqual(@as(u64, 99), decoded.request_id);
+    try testing.expectEqualStrings("asset://textures/grass.png", decoded.uri.?);
+    try testing.expectEqual(@as(?bool, true), decoded.force_recook);
+}
+
+test "acp: read Go test vectors" {
+    const file_data = try read_go_vectors("testdata/go/acp.bin");
+    if (file_data == null) return;
+    defer testing.allocator.free(file_data.?);
+
+    const cases = try framing.read_all_test_cases(testing.allocator, file_data.?);
+    defer testing.allocator.free(cases);
+
+    for (cases) |tc| {
+        var decoded = try AcpMessage.decode(testing.allocator, tc.data);
+        defer decoded.deinit(testing.allocator);
+
+        if (std.mem.eql(u8, tc.name, "empty")) {
+            try testing.expectEqual(@as(?u32, null), decoded.version);
+            try testing.expectEqual(@as(u64, 0), decoded.request_id);
+        } else if (std.mem.eql(u8, tc.name, "hello")) {
+            try testing.expectEqual(@as(?u32, 1), decoded.version);
+            try testing.expectEqual(AcpMessageKind.HELLO, decoded.kind);
+        } else if (std.mem.eql(u8, tc.name, "request_with_uri")) {
+            try testing.expectEqual(@as(?u32, 1), decoded.version);
+            try testing.expectEqual(AcpMessageKind.REQUEST, decoded.kind);
+            try testing.expectEqual(@as(u64, 42), decoded.request_id);
+            try testing.expectEqualStrings("asset://textures/wood.png", decoded.uri.?);
+        } else if (std.mem.eql(u8, tc.name, "discover_with_uris")) {
+            try testing.expectEqual(AcpMessageKind.DISCOVER, decoded.kind);
+            try testing.expectEqual(@as(u64, 100), decoded.request_id);
+            try testing.expectEqual(@as(usize, 3), decoded.uris.len);
+            try testing.expectEqualStrings("asset://models/tree.glb", decoded.uris[0]);
+            try testing.expectEqualStrings("asset://textures/bark.png", decoded.uris[1]);
+            try testing.expectEqualStrings("asset://shaders/pbr.wgsl", decoded.uris[2]);
+        } else if (std.mem.eql(u8, tc.name, "status_ok_with_metadata")) {
+            try testing.expectEqual(AcpMessageKind.STATUS, decoded.kind);
+            try testing.expectEqual(@as(?AcpStatusCode, .OK), decoded.status);
+            try testing.expect(decoded.metadata != null);
+            try testing.expectEqualStrings("asset://textures/wood.png", decoded.metadata.?.uri);
+            try testing.expectEqual(@as(i64, 1048576), decoded.metadata.?.file_length);
+            try testing.expectEqual(@as(i64, 1700000000000000000), decoded.metadata.?.updated_at_ns);
+        } else if (std.mem.eql(u8, tc.name, "status_not_found")) {
+            try testing.expectEqual(@as(?AcpStatusCode, .NOT_FOUND), decoded.status);
+            try testing.expectEqualStrings("asset not found in registry", decoded.detail.?);
+        } else if (std.mem.eql(u8, tc.name, "updated_with_chunks")) {
+            try testing.expectEqual(AcpMessageKind.UPDATED, decoded.kind);
+            try testing.expectEqual(@as(u32, 3), decoded.chunk_index);
+            try testing.expectEqual(@as(u32, 10), decoded.chunk_total);
+            try testing.expect(decoded.metadata != null);
+        } else if (std.mem.eql(u8, tc.name, "force_recook")) {
+            try testing.expectEqual(@as(?u32, 2), decoded.version);
+            try testing.expectEqual(@as(?bool, true), decoded.force_recook);
+            try testing.expectEqualStrings("asset://textures/grass.png", decoded.uri.?);
+        } else if (std.mem.eql(u8, tc.name, "all_status_codes")) {
+            try testing.expectEqual(@as(?AcpStatusCode, .INTERNAL_ERROR), decoded.status);
+            try testing.expectEqualStrings("unexpected codec failure", decoded.detail.?);
+        } else if (std.mem.eql(u8, tc.name, "deload")) {
+            try testing.expectEqual(AcpMessageKind.DELOAD, decoded.kind);
+            try testing.expectEqual(@as(usize, 1), decoded.uris.len);
+        }
+    }
+}
+
+test "acp: write Zig test vectors" {
+    const discover_uris = &[_][]const u8{
+        "asset://models/tree.glb",
+        "asset://textures/bark.png",
+        "asset://shaders/pbr.wgsl",
+    };
+    const deload_uris = &[_][]const u8{
+        "asset://textures/old.png",
+    };
+    const cases = [_]struct { name: []const u8, msg: AcpMessage }{
+        .{ .name = "empty", .msg = .{} },
+        .{ .name = "hello", .msg = .{
+            .version = 1,
+            .kind = .HELLO,
+        } },
+        .{ .name = "request_with_uri", .msg = .{
+            .version = 1,
+            .kind = .REQUEST,
+            .request_id = 42,
+            .uri = "asset://textures/wood.png",
+        } },
+        .{ .name = "discover_with_uris", .msg = .{
+            .kind = .DISCOVER,
+            .request_id = 100,
+            .uris = discover_uris,
+        } },
+        .{ .name = "status_ok_with_metadata", .msg = .{
+            .kind = .STATUS,
+            .request_id = 7,
+            .status = .OK,
+            .metadata = .{
+                .uri = "asset://textures/wood.png",
+                .cache_path = "/tmp/cache/abc123",
+                .payload_hash = "sha256:deadbeef",
+                .file_length = 1048576,
+                .uri_version = 3,
+                .updated_at_ns = 1700000000000000000,
+            },
+        } },
+        .{ .name = "status_not_found", .msg = .{
+            .kind = .STATUS,
+            .request_id = 8,
+            .status = .NOT_FOUND,
+            .detail = "asset not found in registry",
+        } },
+        .{ .name = "updated_with_chunks", .msg = .{
+            .kind = .UPDATED,
+            .request_id = 200,
+            .uri = "asset://models/character.glb",
+            .chunk_index = 3,
+            .chunk_total = 10,
+            .metadata = .{
+                .uri = "asset://models/character.glb",
+                .cache_path = "/var/cache/acp/char",
+                .payload_hash = "sha256:cafebabe",
+                .file_length = 5242880,
+                .uri_version = 1,
+                .updated_at_ns = 1700000000500000000,
+            },
+        } },
+        .{ .name = "force_recook", .msg = .{
+            .version = 2,
+            .kind = .REQUEST,
+            .request_id = 99,
+            .uri = "asset://textures/grass.png",
+            .force_recook = true,
+        } },
+        .{ .name = "all_status_codes", .msg = .{
+            .kind = .STATUS,
+            .status = .INTERNAL_ERROR,
+            .detail = "unexpected codec failure",
+        } },
+        .{ .name = "deload", .msg = .{
+            .kind = .DELOAD,
+            .uris = deload_uris,
+        } },
+    };
+
+    try write_test_vectors(AcpMessage, &cases, "testdata/zig/acp.bin");
 }
