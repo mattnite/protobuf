@@ -12,6 +12,18 @@ const Emitter = emitter.Emitter;
 
 /// Generate a complete Zig source file from a proto AST File.
 pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
+    // Resolve enum type references before codegen.
+    // Collect file-level enum names, then walk all messages to replace
+    // .named TypeRefs with .enum_ref where the name matches an enum.
+    var file_enum_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer file_enum_names.deinit(allocator);
+    for (file.enums) |en| {
+        try file_enum_names.append(allocator, en.name);
+    }
+    for (file.messages) |*msg| {
+        resolve_message_enum_refs(msg, file_enum_names.items);
+    }
+
     var e = Emitter.init(allocator);
     defer e.deinit();
 
@@ -94,6 +106,68 @@ pub fn package_to_path(allocator: std.mem.Allocator, package: ?[]const u8, proto
     @memcpy(result[0..stem.len], stem);
     @memcpy(result[stem.len..][0..4], ".zig");
     return result;
+}
+
+// ── Enum Reference Resolution ─────────────────────────────────────────
+
+/// Walk a message and its children, replacing .named TypeRefs with .enum_ref
+/// where the name matches a known enum (from file-level or nested scope).
+fn resolve_message_enum_refs(msg: *ast.Message, parent_enum_names: []const []const u8) void {
+    // Build combined set: parent enums + this message's nested enums
+    var buf: [256][]const u8 = undefined;
+    var count: usize = 0;
+    for (parent_enum_names) |name| {
+        buf[count] = name;
+        count += 1;
+    }
+    for (msg.nested_enums) |en| {
+        buf[count] = en.name;
+        count += 1;
+    }
+    const enum_names = buf[0..count];
+
+    // Resolve regular fields
+    for (msg.fields) |*field| {
+        resolve_type_ref(&field.type_name, enum_names);
+    }
+
+    // Resolve oneof fields
+    for (msg.oneofs) |*oneof| {
+        for (oneof.fields) |*field| {
+            resolve_type_ref(&field.type_name, enum_names);
+        }
+    }
+
+    // Resolve map value types
+    for (msg.maps) |*map_field| {
+        resolve_type_ref(&map_field.value_type, enum_names);
+    }
+
+    // Recurse into nested messages
+    for (msg.nested_messages) |*nested| {
+        resolve_message_enum_refs(nested, enum_names);
+    }
+}
+
+fn resolve_type_ref(type_ref: *ast.TypeRef, enum_names: []const []const u8) void {
+    switch (type_ref.*) {
+        .named => |name| {
+            for (enum_names) |en| {
+                if (std.mem.eql(u8, name, en)) {
+                    type_ref.* = .{ .enum_ref = name };
+                    return;
+                }
+            }
+        },
+        else => {},
+    }
+}
+
+fn is_enum_name(name: []const u8, enum_names: []const []const u8) bool {
+    for (enum_names) |en| {
+        if (std.mem.eql(u8, name, en)) return true;
+    }
+    return false;
 }
 
 // ══════════════════════════════════════════════════════════════════════

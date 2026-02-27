@@ -154,6 +154,13 @@ pub const MessageWriter = struct {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .len });
         try encoding.encode_len(self.writer, data);
     }
+
+    /// Write a length-delimited field header (tag + length prefix) without the data.
+    /// Used for nested messages where the data is written separately via encode().
+    pub fn write_len_prefix(self: MessageWriter, field_number: u29, data_len: usize) std.Io.Writer.Error!void {
+        try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .len });
+        try encoding.encode_varint(self.writer, @intCast(data_len));
+    }
 };
 
 // ── Packed Iterators ──────────────────────────────────────────────────

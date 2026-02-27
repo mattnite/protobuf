@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+
+message RepItem {
+    int32 id = 1;
+    string name = 2;
+}
+
+message RepeatedMessage {
+    repeated int32 ints = 1;
+    repeated string strings = 2;
+    repeated double doubles = 3;
+    repeated bool bools = 4;
+    repeated bytes byte_slices = 5;
+    repeated RepItem items = 6;
+}

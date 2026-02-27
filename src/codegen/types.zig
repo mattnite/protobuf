@@ -124,6 +124,50 @@ pub fn scalar_decode_expr(s: ScalarType) []const u8 {
     };
 }
 
+/// Decode expression for packed encoding, where `v` is the raw value from a packed iterator.
+pub fn scalar_packed_decode_expr(s: ScalarType) []const u8 {
+    return switch (s) {
+        .int32 => "@bitCast(@as(u32, @truncate(v)))",
+        .int64 => "@bitCast(v)",
+        .uint32 => "@truncate(v)",
+        .uint64 => "v",
+        .sint32 => "encoding.zigzag_decode(@truncate(v))",
+        .sint64 => "encoding.zigzag_decode_64(v)",
+        .bool => "v != 0",
+        .double => "@bitCast(v)",
+        .float => "@bitCast(v)",
+        .fixed32 => "v",
+        .fixed64 => "v",
+        .sfixed32 => "@bitCast(v)",
+        .sfixed64 => "@bitCast(v)",
+        .string, .bytes => unreachable,
+    };
+}
+
+/// The packed iterator type name for a given scalar type.
+pub fn scalar_packed_iterator(s: ScalarType) []const u8 {
+    return switch (s) {
+        .int32, .int64, .uint32, .uint64, .sint32, .sint64, .bool => "message.PackedVarintIterator",
+        .fixed32, .sfixed32, .float => "message.PackedFixed32Iterator",
+        .fixed64, .sfixed64, .double => "message.PackedFixed64Iterator",
+        .string, .bytes => unreachable,
+    };
+}
+
+/// The wire type variant name for individual (non-packed) encoding of a scalar.
+pub fn scalar_wire_variant(s: ScalarType) []const u8 {
+    return switch (s) {
+        .int32, .int64, .uint32, .uint64, .sint32, .sint64, .bool => ".varint",
+        .fixed32, .sfixed32, .float => ".i32",
+        .fixed64, .sfixed64, .double => ".i64",
+        .string, .bytes => ".len",
+    };
+}
+
+pub fn is_packable_scalar(s: ScalarType) bool {
+    return s != .string and s != .bytes;
+}
+
 const zig_keywords = [_][]const u8{
     "addrspace",  "align",      "allowzero", "and",        "anyframe",
     "anytype",    "asm",        "async",     "await",      "break",

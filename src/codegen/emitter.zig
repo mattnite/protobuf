@@ -48,6 +48,13 @@ pub const Emitter = struct {
         try self.print_raw("}}\n", .{});
     }
 
+    /// Close a brace with trailing comma — used for switch arm blocks
+    pub fn close_brace_comma(self: *Emitter) !void {
+        self.indent_level -= 1;
+        try self.indent();
+        try self.print_raw("}},\n", .{});
+    }
+
     pub fn blank_line(self: *Emitter) !void {
         try self.print_raw("\n", .{});
     }

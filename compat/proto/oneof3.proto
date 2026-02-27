@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+
+message SubMsg {
+    int32 id = 1;
+    string text = 2;
+}
+
+message OneofMessage {
+    string name = 1;
+    oneof value {
+        string str_val = 10;
+        int32 int_val = 11;
+        bytes bytes_val = 12;
+        SubMsg msg_val = 13;
+    }
+}
