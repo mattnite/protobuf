@@ -18,6 +18,25 @@ jobs:
       - name: Run unit tests
         run: zig build test
 
+  protoc-tests:
+    runs-on: x86_64-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install protoc
+        run: |
+          apt-get update && apt-get install -y curl unzip
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip -o protoc.zip
+          unzip -q protoc.zip -d /usr/local
+          rm protoc.zip
+
+      - name: Run protoc plugin tests
+        run: zig build protoc-test
+
   compat-tests:
     runs-on: x86_64-linux
     steps:

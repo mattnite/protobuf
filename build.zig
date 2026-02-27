@@ -58,7 +58,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    test_step.dependOn(&b.addRunArtifact(protoc_tests).step);
+    const protoc_test_step = b.step("protoc-test", "Run protoc plugin integration tests");
+    protoc_test_step.dependOn(&b.addRunArtifact(protoc_tests).step);
 }
 
 /// Create a GenerateStep that compiles .proto files into importable Zig modules.
