@@ -68,6 +68,8 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
     try emit_deinit_method(e, msg, syntax);
     try e.blank_line();
     try emit_to_json_method(e, msg, syntax);
+    try e.blank_line();
+    try emit_from_json_method(e, msg, syntax);
 
     try e.close_brace();
 }
@@ -1597,6 +1599,328 @@ fn emit_json_oneof(e: *Emitter, oneof: ast.Oneof) !void {
         }
     }
     try e.close_brace();
+}
+
+// ── JSON Deserialization Method ─────────────────────────────────────────
+
+fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    const json_mod = "json";
+
+    // from_json entry point
+    try e.print("pub fn from_json(allocator: std.mem.Allocator, json_bytes: []const u8) !@This()", .{});
+    try e.open_brace();
+    try e.print("var scanner = {s}.JsonScanner.init(allocator, json_bytes);\n", .{json_mod});
+    try e.print("defer scanner.deinit();\n", .{});
+    try e.print("return try from_json_scanner(allocator, &scanner);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_json_scanner
+    try e.print("pub fn from_json_scanner(allocator: std.mem.Allocator, scanner: *{s}.JsonScanner) !@This()", .{json_mod});
+    try e.open_brace();
+    try e.print("var result: @This() = .{{}};\n", .{});
+
+    // Expect object_start
+    try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("if (start_tok != .object_start) return error.UnexpectedToken;\n", .{});
+
+    // Loop over keys
+    try e.print("while (true)", .{});
+    try e.open_brace();
+    try e.print("const tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("switch (tok)", .{});
+    try e.open_brace();
+    try e.print(".object_end => return result,\n", .{});
+    try e.print(".string => |key|", .{});
+    try e.open_brace();
+
+    // Null check: peek for null_value, if so consume and continue
+    try e.print("if (try scanner.peek()) |peeked| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (peeked == .null_value) {{\n", .{});
+    e.indent_level += 1;
+    try e.print("_ = try scanner.next();\n", .{});
+    try e.print("continue;\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}}\n", .{});
+
+    // Collect all fields for the if/else if chain
+    const items = try collect_all_fields(e.allocator, msg);
+    defer e.allocator.free(items);
+
+    var first_branch = true;
+    for (items) |item| {
+        switch (item) {
+            .field => |f| {
+                try emit_from_json_field_branch(e, f, syntax, &first_branch);
+            },
+            .map => |m| {
+                try emit_from_json_map_branch(e, m, &first_branch);
+            },
+            .oneof => |o| {
+                for (o.fields) |f| {
+                    try emit_from_json_oneof_field_branch(e, f, o, &first_branch);
+                }
+            },
+        }
+    }
+
+    // else: skip unknown field
+    if (first_branch) {
+        try e.print("try {s}.skip_value(scanner);\n", .{json_mod});
+    } else {
+        try e.print(" else {{\n", .{});
+        e.indent_level += 1;
+        try e.print("try {s}.skip_value(scanner);\n", .{json_mod});
+        e.indent_level -= 1;
+        try e.print("}}\n", .{});
+    }
+
+    try e.close_brace_comma(); // .string => |key| { ... },
+    try e.print("else => return error.UnexpectedToken,\n", .{});
+    try e.close_brace_nosemi(); // switch
+    try e.close_brace_nosemi(); // while
+    try e.print("return result;\n", .{});
+    try e.close_brace_nosemi(); // fn
+}
+
+fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, first_branch: *bool) !void {
+    const escaped = types.escape_zig_keyword(field.name);
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(field.name, field.options, &json_name_buf);
+    const json_mod = "json";
+
+    // Build condition: match both camelCase and original name
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, key, \"{s}\")", .{jname});
+    if (!std.mem.eql(u8, jname, field.name)) {
+        try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{field.name});
+    }
+    try e.print_raw(")", .{});
+    try e.open_brace();
+
+    switch (field.type_name) {
+        .scalar => |s| {
+            const read_fn = types.scalar_json_read_fn(s);
+            switch (field.label) {
+                .implicit, .optional, .required => {
+                    if (s == .string) {
+                        try e.print("result.{f} = try allocator.dupe(u8, try {s}.{s}(scanner));\n", .{ escaped, json_mod, read_fn });
+                    } else if (s == .bytes) {
+                        try e.print("result.{f} = try {s}.{s}(scanner, allocator);\n", .{ escaped, json_mod, read_fn });
+                    } else {
+                        try e.print("result.{f} = try {s}.{s}(scanner);\n", .{ escaped, json_mod, read_fn });
+                    }
+                },
+                .repeated => {
+                    try emit_from_json_repeated_scalar(e, escaped, s, read_fn);
+                },
+            }
+        },
+        .named => |name| {
+            switch (field.label) {
+                .implicit, .optional, .required => {
+                    try e.print("result.{f} = try {s}.from_json_scanner(allocator, scanner);\n", .{ escaped, name });
+                },
+                .repeated => {
+                    try emit_from_json_repeated_named(e, escaped, name);
+                },
+            }
+        },
+        .enum_ref => {
+            switch (field.label) {
+                .implicit, .optional, .required => {
+                    try e.print("result.{f} = @enumFromInt(try {s}.read_enum_int(scanner));\n", .{ escaped, json_mod });
+                },
+                .repeated => {
+                    try emit_from_json_repeated_enum(e, escaped);
+                },
+            }
+        },
+    }
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
+fn emit_from_json_repeated_scalar(e: *Emitter, escaped: types.EscapedName, s: ast.ScalarType, read_fn: []const u8) !void {
+    const json_mod = "json";
+    try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
+    try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{types.scalar_zig_type(s)});
+    try e.print("while (true)", .{});
+    try e.open_brace();
+    try e.print("if (try scanner.peek()) |p| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (p == .array_end) {{ _ = try scanner.next(); break; }}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}} else break;\n", .{});
+    if (s == .string) {
+        try e.print("try list.append(allocator, try allocator.dupe(u8, try {s}.{s}(scanner)));\n", .{ json_mod, read_fn });
+    } else if (s == .bytes) {
+        try e.print("try list.append(allocator, try {s}.{s}(scanner, allocator));\n", .{ json_mod, read_fn });
+    } else {
+        try e.print("try list.append(allocator, try {s}.{s}(scanner));\n", .{ json_mod, read_fn });
+    }
+    try e.close_brace_nosemi();
+    try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+}
+
+fn emit_from_json_repeated_named(e: *Emitter, escaped: types.EscapedName, name: []const u8) !void {
+    try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
+    try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
+    try e.print("while (true)", .{});
+    try e.open_brace();
+    try e.print("if (try scanner.peek()) |p| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (p == .array_end) {{ _ = try scanner.next(); break; }}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}} else break;\n", .{});
+    try e.print("try list.append(allocator, try {s}.from_json_scanner(allocator, scanner));\n", .{name});
+    try e.close_brace_nosemi();
+    try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+}
+
+fn emit_from_json_repeated_enum(e: *Emitter, escaped: types.EscapedName) !void {
+    const json_mod = "json";
+    try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
+    try e.print("var list: std.ArrayListUnmanaged(@TypeOf(result.{f}[0])) = .empty;\n", .{escaped});
+    try e.print("while (true)", .{});
+    try e.open_brace();
+    try e.print("if (try scanner.peek()) |p| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (p == .array_end) {{ _ = try scanner.next(); break; }}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}} else break;\n", .{});
+    try e.print("try list.append(allocator, @enumFromInt(try {s}.read_enum_int(scanner)));\n", .{json_mod});
+    try e.close_brace_nosemi();
+    try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
+}
+
+fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch: *bool) !void {
+    const escaped = types.escape_zig_keyword(map_field.name);
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(map_field.name, map_field.options, &json_name_buf);
+    const json_mod = "json";
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, key, \"{s}\")", .{jname});
+    if (!std.mem.eql(u8, jname, map_field.name)) {
+        try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{map_field.name});
+    }
+    try e.print_raw(")", .{});
+    try e.open_brace();
+
+    // Expect object_start
+    try e.print("const map_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
+    try e.print("if (map_start != .object_start) return error.UnexpectedToken;\n", .{});
+
+    // Loop
+    try e.print("while (true)", .{});
+    try e.open_brace();
+    try e.print("if (try scanner.peek()) |p| {{\n", .{});
+    e.indent_level += 1;
+    try e.print("if (p == .object_end) {{ _ = try scanner.next(); break; }}\n", .{});
+    e.indent_level -= 1;
+    try e.print("}} else break;\n", .{});
+
+    // Read key as string
+    try e.print("const map_key_str = try {s}.read_string(scanner);\n", .{json_mod});
+
+    // Coerce key
+    if (types.is_string_key(map_field.key_type)) {
+        try e.print("const map_key = try allocator.dupe(u8, map_key_str);\n", .{});
+    } else if (map_field.key_type == .bool) {
+        try e.print("const map_key = std.mem.eql(u8, map_key_str, \"true\");\n", .{});
+    } else {
+        // Integer key types
+        const zig_type = types.scalar_zig_type(map_field.key_type);
+        try e.print("const map_key = std.fmt.parseInt({s}, map_key_str, 10) catch return error.Overflow;\n", .{zig_type});
+    }
+
+    // Read value
+    switch (map_field.value_type) {
+        .scalar => |s| {
+            const read_fn = types.scalar_json_read_fn(s);
+            if (s == .string) {
+                try e.print("const map_val = try allocator.dupe(u8, try {s}.{s}(scanner));\n", .{ json_mod, read_fn });
+            } else if (s == .bytes) {
+                try e.print("const map_val = try {s}.{s}(scanner, allocator);\n", .{ json_mod, read_fn });
+            } else {
+                try e.print("const map_val = try {s}.{s}(scanner);\n", .{ json_mod, read_fn });
+            }
+        },
+        .named => |name| {
+            try e.print("const map_val = try {s}.from_json_scanner(allocator, scanner);\n", .{name});
+        },
+        .enum_ref => {
+            try e.print("const map_val = @enumFromInt(try {s}.read_enum_int(scanner));\n", .{json_mod});
+        },
+    }
+
+    try e.print("try result.{f}.put(allocator, map_key, map_val);\n", .{escaped});
+
+    try e.close_brace_nosemi(); // while
+    e.indent_level -= 1;
+    try e.print("}}", .{});
+}
+
+fn emit_from_json_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.Oneof, first_branch: *bool) !void {
+    const field_escaped = types.escape_zig_keyword(field.name);
+    const oneof_escaped = types.escape_zig_keyword(oneof.name);
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(field.name, field.options, &json_name_buf);
+    const json_mod = "json";
+
+    if (first_branch.*) {
+        try e.print("if (", .{});
+        first_branch.* = false;
+    } else {
+        try e.print_raw(" else if (", .{});
+    }
+    try e.print_raw("std.mem.eql(u8, key, \"{s}\")", .{jname});
+    if (!std.mem.eql(u8, jname, field.name)) {
+        try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{field.name});
+    }
+    try e.print_raw(")", .{});
+    try e.open_brace();
+
+    switch (field.type_name) {
+        .scalar => |s| {
+            const read_fn = types.scalar_json_read_fn(s);
+            if (s == .string) {
+                try e.print("result.{f} = .{{ .{f} = try allocator.dupe(u8, try {s}.{s}(scanner)) }};\n", .{ oneof_escaped, field_escaped, json_mod, read_fn });
+            } else if (s == .bytes) {
+                try e.print("result.{f} = .{{ .{f} = try {s}.{s}(scanner, allocator) }};\n", .{ oneof_escaped, field_escaped, json_mod, read_fn });
+            } else {
+                try e.print("result.{f} = .{{ .{f} = try {s}.{s}(scanner) }};\n", .{ oneof_escaped, field_escaped, json_mod, read_fn });
+            }
+        },
+        .named => |name| {
+            try e.print("result.{f} = .{{ .{f} = try {s}.from_json_scanner(allocator, scanner) }};\n", .{ oneof_escaped, field_escaped, name });
+        },
+        .enum_ref => {
+            try e.print("result.{f} = .{{ .{f} = @enumFromInt(try {s}.read_enum_int(scanner)) }};\n", .{ oneof_escaped, field_escaped, json_mod });
+        },
+    }
+
+    e.indent_level -= 1;
+    try e.print("}}", .{});
 }
 
 // ── Field Collection Helper ───────────────────────────────────────────
