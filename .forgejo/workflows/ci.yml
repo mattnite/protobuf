@@ -29,7 +29,9 @@ jobs:
 
       - name: Install Go
         run: |
-          curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+          wget -q https://go.dev/dl/go1.23.6.linux-amd64.tar.gz
+          tar -C /usr/local -xzf go1.23.6.linux-amd64.tar.gz
+          rm go1.23.6.linux-amd64.tar.gz
           echo "/usr/local/go/bin" >> "$GITHUB_PATH"
 
       - name: Generate Go test vectors
