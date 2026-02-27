@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
 
-    // protoc plugin integration tests (requires system protoc)
+    // protoc plugin integration tests
     const protoc_test_options = b.addOptions();
     protoc_test_options.addOptionPath("plugin_path", protoc_gen_zig.getEmittedBin());
     protoc_test_options.addOptionPath("proto_dir", b.path("compat/proto"));
@@ -58,8 +58,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const protoc_test_step = b.step("protoc-test", "Run protoc plugin integration tests (requires system protoc)");
-    protoc_test_step.dependOn(&b.addRunArtifact(protoc_tests).step);
+    test_step.dependOn(&b.addRunArtifact(protoc_tests).step);
 }
 
 /// Create a GenerateStep that compiles .proto files into importable Zig modules.
