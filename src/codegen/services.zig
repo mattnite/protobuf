@@ -104,9 +104,6 @@ fn emit_server(e: *Emitter, service: ast.Service) !void {
         try e.blank_line();
     }
 
-    try emit_server_init(e);
-    try e.blank_line();
-
     try emit_server_gen_vtable(e, service);
 
     try e.close_brace();
@@ -187,23 +184,8 @@ fn emit_server_dispatch(e: *Emitter, method: ast.Method) !void {
     }
 }
 
-fn emit_server_init(e: *Emitter) !void {
-    try e.print("pub fn init(impl: anytype) Server", .{});
-    try e.open_brace();
-    try e.print("const Ptr = @TypeOf(impl);\n", .{});
-    try e.print("const Impl = @typeInfo(Ptr).pointer.child;\n", .{});
-    try e.blank_line();
-    try e.print("return .{{\n", .{});
-    e.indent_level += 1;
-    try e.print(".ptr = impl,\n", .{});
-    try e.print(".vtable = &gen_vtable(Impl),\n", .{});
-    e.indent_level -= 1;
-    try e.print("}};\n", .{});
-    try e.close_brace_nosemi();
-}
-
 fn emit_server_gen_vtable(e: *Emitter, service: ast.Service) !void {
-    try e.print("fn gen_vtable(comptime Impl: type) VTable", .{});
+    try e.print("pub fn gen_vtable(comptime Impl: type) VTable", .{});
     try e.open_brace();
     try e.print("return .{{\n", .{});
     e.indent_level += 1;
@@ -412,8 +394,7 @@ test "emit_service: unary method" {
     try expect_contains(output, "get_feature: *const fn (*anyopaque, *rpc.Context, Point) rpc.RpcError!Feature,");
     try expect_contains(output, "pub fn get_feature(self: Server, ctx: *rpc.Context, req: Point) rpc.RpcError!Feature");
     try expect_contains(output, "return self.vtable.get_feature(self.ptr, ctx, req);");
-    try expect_contains(output, "pub fn init(impl: anytype) Server");
-    try expect_contains(output, "fn gen_vtable(comptime Impl: type) VTable");
+    try expect_contains(output, "pub fn gen_vtable(comptime Impl: type) VTable");
     try expect_contains(output, "const self: *Impl = @ptrCast(@alignCast(p));");
     try expect_contains(output, "return self.get_feature(ctx, req);");
 

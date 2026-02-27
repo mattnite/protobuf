@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+message NameRequest {
+    string input = 1;
+}
+
+message NameResponse {
+    string output = 1;
+}
+
+service NamingService {
+    rpc A(NameRequest) returns (NameResponse);
+    rpc AB(NameRequest) returns (NameResponse);
+    rpc GetHTTPResponse(NameRequest) returns (NameResponse);
+    rpc DoXMLParsing(NameRequest) returns (NameResponse);
+    rpc SimpleCall(NameRequest) returns (NameResponse);
+    rpc X(NameRequest) returns (NameResponse);
+    rpc GetUserByID(NameRequest) returns (NameResponse);
+}

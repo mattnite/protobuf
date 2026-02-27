@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+message PingRequest {
+    string payload = 1;
+}
+
+message PingResponse {
+    string payload = 1;
+}
+
+message GetItemRequest {
+    int32 id = 1;
+    string query = 2;
+}
+
+message GetItemResponse {
+    int32 id = 1;
+    string name = 2;
+}
+
+message HealthRequest {
+    string service_name = 1;
+}
+
+message HealthResponse {
+    string status = 1;
+}
+
+message EchoMessage {
+    string text = 1;
+    int32 code = 2;
+}
+
+service UnaryService {
+    rpc Ping(PingRequest) returns (PingResponse);
+    rpc GetItem(GetItemRequest) returns (GetItemResponse);
+    rpc Health(HealthRequest) returns (HealthResponse);
+    rpc Echo(EchoMessage) returns (EchoMessage);
+}
