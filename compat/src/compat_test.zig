@@ -36,6 +36,10 @@ const TextEnum = proto.text3.TextEnum;
 
 const json = @import("protobuf").json;
 const text_format = @import("protobuf").text_format;
+const descriptor = @import("protobuf").descriptor;
+const dynamic = @import("protobuf").dynamic;
+const DynamicMessage = dynamic.DynamicMessage;
+const DynamicValue = dynamic.DynamicValue;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -2432,4 +2436,266 @@ test "text round-trip: fully populated message" {
     try testing.expectEqualStrings("item", decoded.items[0].y);
     try testing.expectEqual(@as(usize, 1), decoded.counts.count());
     try testing.expectEqual(@as(i32, 1), decoded.counts.get("k").?);
+}
+
+// ── Descriptor Tests ──────────────────────────────────────────────────
+
+test "descriptor: ScalarMessage has 16 fields" {
+    const desc = ScalarMessage.descriptor;
+    try testing.expectEqualStrings("ScalarMessage", desc.name);
+    try testing.expectEqual(@as(usize, 16), desc.fields.len);
+    // First field
+    try testing.expectEqualStrings("f_double", desc.fields[0].name);
+    try testing.expectEqual(@as(i32, 1), desc.fields[0].number);
+    try testing.expectEqual(descriptor.FieldType.double, desc.fields[0].field_type);
+    try testing.expectEqual(descriptor.FieldLabel.implicit, desc.fields[0].label);
+    // Last field
+    try testing.expectEqualStrings("f_large_tag", desc.fields[15].name);
+    try testing.expectEqual(@as(i32, 1000), desc.fields[15].number);
+}
+
+test "descriptor: EnumMessage fields and enum descriptor" {
+    const desc = EnumMessage.descriptor;
+    try testing.expectEqualStrings("EnumMessage", desc.name);
+    try testing.expectEqual(@as(usize, 3), desc.fields.len);
+    // Enum field
+    try testing.expectEqual(descriptor.FieldType.enum_type, desc.fields[0].field_type);
+    try testing.expectEqualStrings("Color", desc.fields[0].type_name.?);
+    // Repeated enum field
+    try testing.expectEqual(descriptor.FieldLabel.repeated, desc.fields[1].label);
+
+    // Color enum descriptor
+    const color_desc = Color.descriptor;
+    try testing.expectEqualStrings("Color", color_desc.name);
+    try testing.expectEqual(@as(usize, 4), color_desc.values.len);
+    try testing.expectEqualStrings("COLOR_UNSPECIFIED", color_desc.values[0].name);
+    try testing.expectEqual(@as(i32, 0), color_desc.values[0].number);
+    try testing.expectEqualStrings("COLOR_BLUE", color_desc.values[3].name);
+    try testing.expectEqual(@as(i32, 3), color_desc.values[3].number);
+}
+
+test "descriptor: nested message descriptors" {
+    const desc = Outer.descriptor;
+    try testing.expectEqualStrings("Outer", desc.name);
+    try testing.expectEqual(@as(usize, 3), desc.fields.len);
+    // Message reference field
+    try testing.expectEqual(descriptor.FieldType.message, desc.fields[0].field_type);
+    try testing.expectEqualStrings("Middle", desc.fields[0].type_name.?);
+}
+
+test "descriptor: OneofMessage has oneof" {
+    const desc = OneofMessage.descriptor;
+    try testing.expectEqual(@as(usize, 1), desc.oneofs.len);
+    try testing.expectEqualStrings("value", desc.oneofs[0].name);
+    // Oneof fields should have oneof_index
+    var found_oneof_field = false;
+    for (desc.fields) |f| {
+        if (f.oneof_index != null) {
+            try testing.expectEqual(@as(u32, 0), f.oneof_index.?);
+            found_oneof_field = true;
+        }
+    }
+    try testing.expect(found_oneof_field);
+}
+
+test "descriptor: MapMessage has map fields" {
+    const desc = MapMessage.descriptor;
+    try testing.expectEqual(@as(usize, 3), desc.maps.len);
+    // Check first map: str_str
+    try testing.expectEqualStrings("str_str", desc.maps[0].name);
+    try testing.expectEqual(descriptor.FieldType.string, desc.maps[0].entry.key_type);
+    try testing.expectEqual(descriptor.FieldType.string, desc.maps[0].entry.value_type);
+    // Check third map: str_msg (message value)
+    try testing.expectEqualStrings("str_msg", desc.maps[2].name);
+    try testing.expectEqual(descriptor.FieldType.message, desc.maps[2].entry.value_type);
+    try testing.expectEqualStrings("MapSubMsg", desc.maps[2].entry.value_type_name.?);
+}
+
+test "descriptor: file descriptor accessible" {
+    const fd = proto.scalar3._file_descriptor;
+    try testing.expectEqualStrings("scalar3.proto", fd.name);
+    try testing.expectEqual(descriptor.Syntax.proto3, fd.syntax);
+    try testing.expectEqual(@as(usize, 1), fd.messages.len);
+    try testing.expectEqualStrings("ScalarMessage", fd.messages[0].name);
+}
+
+test "descriptor: enum3 file descriptor" {
+    const fd = proto.enum3._file_descriptor;
+    try testing.expectEqual(@as(usize, 1), fd.messages.len);
+    try testing.expectEqual(@as(usize, 1), fd.enums.len);
+    try testing.expectEqualStrings("Color", fd.enums[0].name);
+    try testing.expectEqualStrings("EnumMessage", fd.messages[0].name);
+}
+
+test "descriptor: json_name set when different from name" {
+    const desc = ScalarMessage.descriptor;
+    // "f_double" in camelCase is "fDouble"
+    try testing.expectEqualStrings("fDouble", desc.fields[0].json_name.?);
+    // "f_large_tag" -> "fLargeTag"
+    try testing.expectEqualStrings("fLargeTag", desc.fields[15].json_name.?);
+}
+
+// ── DynamicMessage Interop Tests ──────────────────────────────────────
+
+test "dynamic interop: generated encode → dynamic decode (scalars)" {
+    const generated = ScalarMessage{
+        .f_double = 3.14,
+        .f_float = 2.72,
+        .f_int32 = -42,
+        .f_int64 = -100000,
+        .f_uint32 = 42,
+        .f_uint64 = 100000,
+        .f_sint32 = -7,
+        .f_sint64 = -8,
+        .f_fixed32 = 9,
+        .f_fixed64 = 10,
+        .f_sfixed32 = -11,
+        .f_sfixed64 = -12,
+        .f_bool = true,
+        .f_string = "hello",
+        .f_bytes = "world",
+        .f_large_tag = 999,
+    };
+
+    const encoded = try encode_to_buf(ScalarMessage, generated);
+    defer testing.allocator.free(encoded);
+
+    var dyn = try DynamicMessage.decode(testing.allocator, &ScalarMessage.descriptor, encoded);
+    defer dyn.deinit();
+
+    try testing.expectEqual(@as(f64, 3.14), dyn.get(1).?.singular.double_val);
+    try testing.expectApproxEqAbs(@as(f32, 2.72), dyn.get(2).?.singular.float_val, 0.01);
+    try testing.expectEqual(@as(i32, -42), dyn.get(3).?.singular.int32_val);
+    try testing.expectEqual(@as(i64, -100000), dyn.get(4).?.singular.int64_val);
+    try testing.expectEqual(@as(u32, 42), dyn.get(5).?.singular.uint32_val);
+    try testing.expectEqual(@as(u64, 100000), dyn.get(6).?.singular.uint64_val);
+    try testing.expectEqual(@as(i32, -7), dyn.get(7).?.singular.int32_val);
+    try testing.expectEqual(@as(i64, -8), dyn.get(8).?.singular.int64_val);
+    try testing.expectEqual(@as(u32, 9), dyn.get(9).?.singular.uint32_val);
+    try testing.expectEqual(@as(u64, 10), dyn.get(10).?.singular.uint64_val);
+    try testing.expectEqual(@as(i32, -11), dyn.get(11).?.singular.int32_val);
+    try testing.expectEqual(@as(i64, -12), dyn.get(12).?.singular.int64_val);
+    try testing.expect(dyn.get(13).?.singular.bool_val);
+    try testing.expectEqualStrings("hello", dyn.get(14).?.singular.string_val);
+    try testing.expectEqualStrings("world", dyn.get(15).?.singular.bytes_val);
+    try testing.expectEqual(@as(i32, 999), dyn.get(1000).?.singular.int32_val);
+}
+
+test "dynamic interop: dynamic encode → generated decode (scalars)" {
+    var dyn = DynamicMessage.init(testing.allocator, &ScalarMessage.descriptor);
+    defer dyn.deinit();
+
+    try dyn.set(1, .{ .double_val = 1.5 });
+    try dyn.set(2, .{ .float_val = 2.5 });
+    try dyn.set(3, .{ .int32_val = 100 });
+    try dyn.set(4, .{ .int64_val = 200 });
+    try dyn.set(5, .{ .uint32_val = 300 });
+    try dyn.set(6, .{ .uint64_val = 400 });
+    try dyn.set(7, .{ .int32_val = -50 });
+    try dyn.set(8, .{ .int64_val = -60 });
+    try dyn.set(9, .{ .uint32_val = 70 });
+    try dyn.set(10, .{ .uint64_val = 80 });
+    try dyn.set(11, .{ .int32_val = -90 });
+    try dyn.set(12, .{ .int64_val = -100 });
+    try dyn.set(13, .{ .bool_val = true });
+    try dyn.set(14, .{ .string_val = "dynamic" });
+    try dyn.set(15, .{ .bytes_val = "bytes" });
+
+    var buf: [8192]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try dyn.encode(&writer);
+    const encoded = writer.buffered();
+
+    var decoded = try ScalarMessage.decode(testing.allocator, encoded);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(f64, 1.5), decoded.f_double);
+    try testing.expectApproxEqAbs(@as(f32, 2.5), decoded.f_float, 0.01);
+    try testing.expectEqual(@as(i32, 100), decoded.f_int32);
+    try testing.expectEqual(@as(i64, 200), decoded.f_int64);
+    try testing.expectEqual(@as(u32, 300), decoded.f_uint32);
+    try testing.expectEqual(@as(u64, 400), decoded.f_uint64);
+    try testing.expectEqual(@as(i32, -50), decoded.f_sint32);
+    try testing.expectEqual(@as(i64, -60), decoded.f_sint64);
+    try testing.expectEqual(@as(u32, 70), decoded.f_fixed32);
+    try testing.expectEqual(@as(u64, 80), decoded.f_fixed64);
+    try testing.expectEqual(@as(i32, -90), decoded.f_sfixed32);
+    try testing.expectEqual(@as(i64, -100), decoded.f_sfixed64);
+    try testing.expect(decoded.f_bool);
+    try testing.expectEqualStrings("dynamic", decoded.f_string);
+    try testing.expectEqualStrings("bytes", decoded.f_bytes);
+}
+
+test "dynamic interop: generated→dynamic→re-encode→generated round-trip" {
+    const original = ScalarMessage{
+        .f_double = 99.9,
+        .f_int32 = 42,
+        .f_string = "round-trip",
+        .f_bool = true,
+    };
+
+    // generated → bytes
+    const encoded1 = try encode_to_buf(ScalarMessage, original);
+    defer testing.allocator.free(encoded1);
+
+    // bytes → dynamic
+    var dyn = try DynamicMessage.decode(testing.allocator, &ScalarMessage.descriptor, encoded1);
+    defer dyn.deinit();
+
+    // dynamic → bytes
+    var buf: [8192]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try dyn.encode(&writer);
+    const encoded2 = writer.buffered();
+
+    // bytes → generated
+    var decoded = try ScalarMessage.decode(testing.allocator, encoded2);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(f64, 99.9), decoded.f_double);
+    try testing.expectEqual(@as(i32, 42), decoded.f_int32);
+    try testing.expectEqualStrings("round-trip", decoded.f_string);
+    try testing.expect(decoded.f_bool);
+}
+
+test "dynamic interop: generated encode → dynamic decode (map)" {
+    // Use dynamic message to encode the map (avoids literal key lifetime issues with generated deinit)
+    var dyn_src = DynamicMessage.init(testing.allocator, &MapMessage.descriptor);
+    defer dyn_src.deinit();
+    try dyn_src.putMap(1, .{ .string_val = "key1" }, .{ .string_val = "val1" });
+    try dyn_src.putMap(1, .{ .string_val = "key2" }, .{ .string_val = "val2" });
+
+    var enc_buf: [8192]u8 = undefined;
+    var enc_w: std.Io.Writer = .fixed(&enc_buf);
+    try dyn_src.encode(&enc_w);
+    const encoded = try testing.allocator.dupe(u8, enc_w.buffered());
+    defer testing.allocator.free(encoded);
+
+    var dyn = try DynamicMessage.decode(testing.allocator, &MapMessage.descriptor, encoded);
+    defer dyn.deinit();
+
+    const map_storage = dyn.get(1).?;
+    try testing.expectEqual(@as(usize, 2), map_storage.map_str.count());
+    try testing.expectEqualStrings("val1", map_storage.map_str.get("key1").?.string_val);
+    try testing.expectEqualStrings("val2", map_storage.map_str.get("key2").?.string_val);
+}
+
+test "dynamic interop: dynamic encode → generated decode (map)" {
+    var dyn = DynamicMessage.init(testing.allocator, &MapMessage.descriptor);
+    defer dyn.deinit();
+
+    try dyn.putMap(1, .{ .string_val = "a" }, .{ .string_val = "1" });
+    try dyn.putMap(1, .{ .string_val = "b" }, .{ .string_val = "2" });
+
+    var buf: [8192]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try dyn.encode(&writer);
+    const encoded = writer.buffered();
+
+    var decoded = try MapMessage.decode(testing.allocator, encoded);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 2), decoded.str_str.count());
+    try testing.expectEqualStrings("1", decoded.str_str.get("a").?);
+    try testing.expectEqualStrings("2", decoded.str_str.get("b").?);
 }

@@ -11,7 +11,7 @@ pub const services = @import("codegen/services.zig");
 const Emitter = emitter.Emitter;
 
 /// Generate a complete Zig source file from a proto AST File.
-pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
+pub fn generate_file(allocator: std.mem.Allocator, file: ast.File, proto_filename: []const u8) ![]const u8 {
     // Same-file extension flattening: merge extend blocks into target messages.
     try flatten_extensions(allocator, file.messages, file.extensions);
     for (file.messages) |*msg| {
@@ -46,13 +46,17 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
 
     // Top-level enums
     for (file.enums) |en| {
-        try enums.emit_enum(&e, en, file.syntax);
+        var name_buf: [512]u8 = undefined;
+        const full_name = qualified_name(file.package, en.name, &name_buf);
+        try enums.emit_enum(&e, en, file.syntax, full_name);
         try e.blank_line();
     }
 
     // Top-level messages
     for (file.messages) |msg| {
-        try messages.emit_message(&e, msg, file.syntax);
+        var name_buf: [512]u8 = undefined;
+        const full_name = qualified_name(file.package, msg.name, &name_buf);
+        try messages.emit_message(&e, msg, file.syntax, full_name);
         try e.blank_line();
     }
 
@@ -63,6 +67,12 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
     }
     for (file.services) |service| {
         try services.emit_service(&e, service, file.package);
+        try e.blank_line();
+    }
+
+    // File descriptor
+    if (file.messages.len > 0 or file.enums.len > 0) {
+        try emit_file_descriptor(&e, file, proto_filename);
         try e.blank_line();
     }
 
@@ -113,6 +123,57 @@ pub fn package_to_path(allocator: std.mem.Allocator, package: ?[]const u8, proto
     @memcpy(result[0..stem.len], stem);
     @memcpy(result[stem.len..][0..4], ".zig");
     return result;
+}
+
+// ── Name Helpers ──────────────────────────────────────────────────────
+
+fn qualified_name(package: ?[]const u8, name: []const u8, buf: []u8) []const u8 {
+    if (package) |pkg| {
+        if (pkg.len > 0) {
+            return std.fmt.bufPrint(buf, "{s}.{s}", .{ pkg, name }) catch unreachable;
+        }
+    }
+    return name;
+}
+
+fn emit_file_descriptor(e: *Emitter, file: ast.File, proto_filename: []const u8) !void {
+    try e.print("pub const _file_descriptor = protobuf.descriptor.FileDescriptor{{\n", .{});
+    e.indent_level += 1;
+    try e.print(".name = \"{s}\",\n", .{proto_filename});
+    if (file.package) |pkg| {
+        if (pkg.len > 0) {
+            try e.print(".package = \"{s}\",\n", .{pkg});
+        } else {
+            try e.print(".package = null,\n", .{});
+        }
+    } else {
+        try e.print(".package = null,\n", .{});
+    }
+    try e.print(".syntax = {s},\n", .{switch (file.syntax) {
+        .proto2 => ".proto2",
+        .proto3 => ".proto3",
+    }});
+
+    // Messages
+    try e.print(".messages = &.{{\n", .{});
+    e.indent_level += 1;
+    for (file.messages) |msg| {
+        try e.print("{s}.descriptor,\n", .{msg.name});
+    }
+    e.indent_level -= 1;
+    try e.print("}},\n", .{});
+
+    // Enums
+    try e.print(".enums = &.{{\n", .{});
+    e.indent_level += 1;
+    for (file.enums) |en| {
+        try e.print("{s}.descriptor,\n", .{en.name});
+    }
+    e.indent_level -= 1;
+    try e.print("}},\n", .{});
+
+    e.indent_level -= 1;
+    try e.print("}};\n", .{});
 }
 
 // ── Extension Flattening ──────────────────────────────────────────────
@@ -342,7 +403,7 @@ test "generate_file: proto3 file with enum and message" {
     file.enums = &file_enums;
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     // Verify imports
@@ -382,7 +443,7 @@ test "generate_file: proto2 file with required/optional fields" {
     var file = make_file(.proto2);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     try expect_contains(output, "pub const LegacyUser = struct {");
@@ -430,7 +491,7 @@ test "generate_file: nested messages and enums" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     try expect_contains(output, "pub const Outer = struct {");
@@ -476,7 +537,7 @@ test "generate_file: map fields, oneofs, repeated fields" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     // Map field
@@ -544,7 +605,7 @@ test "generate_file: service with unary method" {
     file.package = "routeguide";
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     // rpc import
@@ -577,7 +638,7 @@ test "generate_file: all streaming modes" {
     var file = make_file(.proto3);
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     // Server VTable
@@ -614,7 +675,7 @@ test "generate_file: service with package path" {
     file.package = "pkg";
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     try expect_contains(output, ".name = \"pkg.Svc\"");
@@ -641,7 +702,7 @@ test "generate_file: service without package" {
     var file = make_file(.proto3);
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     try expect_contains(output, ".name = \"Svc\"");
@@ -675,7 +736,7 @@ test "generate_file: multiple services" {
     var file = make_file(.proto3);
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     try expect_contains(output, "pub const Svc1 = struct");
@@ -685,7 +746,7 @@ test "generate_file: multiple services" {
 test "generate_file: no rpc import without services" {
     const file = make_file(.proto3);
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     // Should NOT contain rpc import when there are no services
@@ -707,7 +768,7 @@ test "generate_file: json import when messages present" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     try expect_contains(output, "const json = protobuf.json;");
@@ -717,10 +778,232 @@ test "generate_file: json import when messages present" {
 test "generate_file: no json import without messages" {
     const file = make_file(.proto3);
 
-    const output = try generate_file(testing.allocator, file);
+    const output = try generate_file(testing.allocator, file, "test.proto");
     defer testing.allocator.free(output);
 
     if (std.mem.indexOf(u8, output, "const json = protobuf.json;") != null) {
         return error.TestExpectedEqual;
     }
+}
+
+// ── Descriptor Tests ──────────────────────────────────────────────────
+
+test "generate_file: file descriptor with package" {
+    var enum_values = [_]ast.EnumValue{
+        .{ .name = "UNKNOWN", .number = 0, .options = &.{}, .location = loc },
+        .{ .name = "ACTIVE", .number = 1, .options = &.{}, .location = loc },
+    };
+    var file_enums = [_]ast.Enum{.{
+        .name = "Status",
+        .values = &enum_values,
+        .options = &.{},
+        .allow_alias = false,
+        .reserved_ranges = &.{},
+        .reserved_names = &.{},
+        .location = loc,
+    }};
+
+    var msg_fields = [_]ast.Field{
+        make_field("name", 1, .implicit, .{ .scalar = .string }),
+        make_field("id", 2, .implicit, .{ .scalar = .int32 }),
+    };
+    var file_msgs = [_]ast.Message{blk: {
+        var m = make_msg("Person");
+        m.fields = &msg_fields;
+        break :blk m;
+    }};
+
+    var file = make_file(.proto3);
+    file.package = "mypackage";
+    file.enums = &file_enums;
+    file.messages = &file_msgs;
+
+    const output = try generate_file(testing.allocator, file, "test.proto");
+    defer testing.allocator.free(output);
+
+    // File descriptor
+    try expect_contains(output, "pub const _file_descriptor = protobuf.descriptor.FileDescriptor{");
+    try expect_contains(output, ".name = \"test.proto\",");
+    try expect_contains(output, ".package = \"mypackage\",");
+    try expect_contains(output, ".syntax = .proto3,");
+    try expect_contains(output, "Person.descriptor,");
+    try expect_contains(output, "Status.descriptor,");
+
+    // Enum descriptor with full_name including package
+    try expect_contains(output, ".full_name = \"mypackage.Status\",");
+
+    // Message descriptor with full_name including package
+    try expect_contains(output, ".full_name = \"mypackage.Person\",");
+}
+
+test "generate_file: file descriptor without package" {
+    var msg_fields = [_]ast.Field{
+        make_field("x", 1, .implicit, .{ .scalar = .int32 }),
+    };
+    var file_msgs = [_]ast.Message{blk: {
+        var m = make_msg("Point");
+        m.fields = &msg_fields;
+        break :blk m;
+    }};
+
+    var file = make_file(.proto3);
+    file.messages = &file_msgs;
+
+    const output = try generate_file(testing.allocator, file, "point.proto");
+    defer testing.allocator.free(output);
+
+    try expect_contains(output, ".name = \"point.proto\",");
+    try expect_contains(output, ".package = null,");
+    try expect_contains(output, ".full_name = \"Point\",");
+}
+
+test "generate_file: no file descriptor when no messages or enums" {
+    const file = make_file(.proto3);
+
+    const output = try generate_file(testing.allocator, file, "empty.proto");
+    defer testing.allocator.free(output);
+
+    if (std.mem.indexOf(u8, output, "_file_descriptor") != null) {
+        return error.TestExpectedEqual;
+    }
+}
+
+test "generate_file: message descriptor with nested types" {
+    var inner_fields = [_]ast.Field{
+        make_field("x", 1, .implicit, .{ .scalar = .int32 }),
+    };
+    var enum_values = [_]ast.EnumValue{
+        .{ .name = "A", .number = 0, .options = &.{}, .location = loc },
+    };
+    var nested_enums = [_]ast.Enum{.{
+        .name = "Kind",
+        .values = &enum_values,
+        .options = &.{},
+        .allow_alias = false,
+        .reserved_ranges = &.{},
+        .reserved_names = &.{},
+        .location = loc,
+    }};
+    var nested_msgs = [_]ast.Message{blk: {
+        var m = make_msg("Inner");
+        m.fields = &inner_fields;
+        break :blk m;
+    }};
+
+    var outer_fields = [_]ast.Field{
+        make_field("inner", 1, .implicit, .{ .named = "Inner" }),
+    };
+    var file_msgs = [_]ast.Message{blk: {
+        var m = make_msg("Outer");
+        m.nested_enums = &nested_enums;
+        m.nested_messages = &nested_msgs;
+        m.fields = &outer_fields;
+        break :blk m;
+    }};
+
+    var file = make_file(.proto3);
+    file.package = "pkg";
+    file.messages = &file_msgs;
+
+    const output = try generate_file(testing.allocator, file, "test.proto");
+    defer testing.allocator.free(output);
+
+    // Nested messages and enums referenced in descriptor
+    try expect_contains(output, ".nested_messages = &.{");
+    try expect_contains(output, "Inner.descriptor,");
+    try expect_contains(output, ".nested_enums = &.{");
+    try expect_contains(output, "Kind.descriptor,");
+    // Full names include parent
+    try expect_contains(output, ".full_name = \"pkg.Outer.Inner\",");
+    try expect_contains(output, ".full_name = \"pkg.Outer.Kind\",");
+}
+
+test "generate_file: message descriptor with map and oneof" {
+    var maps = [_]ast.MapField{.{
+        .name = "labels",
+        .number = 3,
+        .key_type = .string,
+        .value_type = .{ .scalar = .string },
+        .options = &.{},
+        .location = loc,
+    }};
+    var oneof_fields = [_]ast.Field{
+        make_field("text", 4, .implicit, .{ .scalar = .string }),
+        make_field("count", 5, .implicit, .{ .scalar = .int32 }),
+    };
+    var oneofs = [_]ast.Oneof{.{
+        .name = "payload",
+        .fields = &oneof_fields,
+        .options = &.{},
+        .location = loc,
+    }};
+    var msg_fields = [_]ast.Field{
+        make_field("id", 1, .implicit, .{ .scalar = .int32 }),
+    };
+    var file_msgs = [_]ast.Message{blk: {
+        var m = make_msg("Complex");
+        m.fields = &msg_fields;
+        m.maps = &maps;
+        m.oneofs = &oneofs;
+        break :blk m;
+    }};
+
+    var file = make_file(.proto3);
+    file.messages = &file_msgs;
+
+    const output = try generate_file(testing.allocator, file, "test.proto");
+    defer testing.allocator.free(output);
+
+    // Map descriptor
+    try expect_contains(output, ".maps = &.{");
+    try expect_contains(output, ".name = \"labels\", .number = 3");
+    try expect_contains(output, ".key_type = .string, .value_type = .string");
+
+    // Oneof descriptor
+    try expect_contains(output, ".oneofs = &.{");
+    try expect_contains(output, ".name = \"payload\"");
+    // Oneof fields have oneof_index
+    try expect_contains(output, ".name = \"text\", .number = 4");
+    try expect_contains(output, ".oneof_index = 0");
+    try expect_contains(output, ".name = \"count\", .number = 5");
+}
+
+test "generate_file: field descriptor with enum and message refs" {
+    var enum_values = [_]ast.EnumValue{
+        .{ .name = "A", .number = 0, .options = &.{}, .location = loc },
+    };
+    var nested_enums = [_]ast.Enum{.{
+        .name = "Status",
+        .values = &enum_values,
+        .options = &.{},
+        .allow_alias = false,
+        .reserved_ranges = &.{},
+        .reserved_names = &.{},
+        .location = loc,
+    }};
+    var nested_msgs_inner = [_]ast.Message{blk: {
+        break :blk make_msg("SubMsg");
+    }};
+    var msg_fields = [_]ast.Field{
+        make_field("status", 1, .implicit, .{ .enum_ref = "Status" }),
+        make_field("sub", 2, .optional, .{ .named = "SubMsg" }),
+    };
+    var file_msgs = [_]ast.Message{blk: {
+        var m = make_msg("MyMsg");
+        m.fields = &msg_fields;
+        m.nested_enums = &nested_enums;
+        m.nested_messages = &nested_msgs_inner;
+        break :blk m;
+    }};
+
+    var file = make_file(.proto3);
+    file.messages = &file_msgs;
+
+    const output = try generate_file(testing.allocator, file, "test.proto");
+    defer testing.allocator.free(output);
+
+    // Enum field
+    try expect_contains(output, ".field_type = .enum_type, .label = .implicit, .type_name = \"Status\"");
+    // Message field
+    try expect_contains(output, ".field_type = .message, .label = .optional, .type_name = \"SubMsg\"");
 }

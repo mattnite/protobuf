@@ -170,7 +170,7 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
     var outputs: std.ArrayListUnmanaged(OutputFile) = .empty;
 
     for (resolved.files, 0..) |rf, i| {
-        const content = try codegen_mod.generate_file(arena, rf.source);
+        const content = try codegen_mod.generate_file(arena, rf.source, sources.items[i].filename);
         const out_path = try codegen_mod.package_to_path(arena, rf.source.package, sources.items[i].filename);
         const mod_name = deriveModuleName(sources.items[i].filename);
         try outputs.append(arena, .{ .path = out_path, .content = content, .mod_name = mod_name });

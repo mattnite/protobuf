@@ -14,19 +14,23 @@ comptime {
     _ = message;
 }
 
-pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) std.mem.Allocator.Error!void {
+pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_name: []const u8) std.mem.Allocator.Error!void {
     try e.print("pub const {s} = struct", .{msg.name});
     try e.open_brace();
 
     // Nested enums first
     for (msg.nested_enums) |nested_enum| {
-        try enums.emit_enum(e, nested_enum, syntax);
+        var name_buf: [512]u8 = undefined;
+        const nested_full = std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ full_name, nested_enum.name }) catch unreachable;
+        try enums.emit_enum(e, nested_enum, syntax, nested_full);
         try e.blank_line();
     }
 
     // Nested messages
     for (msg.nested_messages) |nested_msg| {
-        try emit_message(e, nested_msg, syntax);
+        var name_buf: [512]u8 = undefined;
+        const nested_full = std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ full_name, nested_msg.name }) catch unreachable;
+        try emit_message(e, nested_msg, syntax, nested_full);
         try e.blank_line();
     }
 
@@ -38,7 +42,9 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) std.mem.A
 
     // Group types (emit as nested structs)
     for (msg.groups) |group| {
-        try emit_group_struct(e, group, syntax);
+        var group_name_buf: [512]u8 = undefined;
+        const group_full = std.fmt.bufPrint(&group_name_buf, "{s}.{s}", .{ full_name, group.name }) catch unreachable;
+        try emit_group_struct(e, group, syntax, group_full);
         try e.blank_line();
     }
 
@@ -78,6 +84,10 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) std.mem.A
         }
     }
 
+    // Descriptor
+    try e.blank_line();
+    try emit_descriptor(e, msg, syntax, full_name);
+
     // Methods
     try e.blank_line();
     try emit_encode_method(e, msg, syntax);
@@ -97,6 +107,223 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) std.mem.A
     try emit_from_text_method(e, msg, syntax);
 
     try e.close_brace();
+}
+
+fn emit_descriptor(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_name: []const u8) std.mem.Allocator.Error!void {
+    _ = syntax;
+    try e.print("pub const descriptor = protobuf.descriptor.MessageDescriptor{{\n", .{});
+    e.indent_level += 1;
+    try e.print(".name = \"{s}\",\n", .{msg.name});
+    try e.print(".full_name = \"{s}\",\n", .{full_name});
+
+    // Fields
+    try e.print(".fields = &.{{\n", .{});
+    e.indent_level += 1;
+    // Regular fields
+    for (msg.fields) |field| {
+        try emit_field_descriptor(e, field);
+    }
+    // Oneof fields
+    for (msg.oneofs, 0..) |oneof, oneof_idx| {
+        for (oneof.fields) |field| {
+            try emit_oneof_field_descriptor(e, field, @intCast(oneof_idx));
+        }
+    }
+    // Group fields
+    for (msg.groups) |group| {
+        try emit_group_field_descriptor(e, group);
+    }
+    e.indent_level -= 1;
+    try e.print("}},\n", .{});
+
+    // Oneofs
+    if (msg.oneofs.len > 0) {
+        try e.print(".oneofs = &.{{\n", .{});
+        e.indent_level += 1;
+        for (msg.oneofs) |oneof| {
+            try e.print(".{{ .name = \"{s}\" }},\n", .{oneof.name});
+        }
+        e.indent_level -= 1;
+        try e.print("}},\n", .{});
+    }
+
+    // Nested messages
+    if (msg.nested_messages.len > 0) {
+        try e.print(".nested_messages = &.{{\n", .{});
+        e.indent_level += 1;
+        for (msg.nested_messages) |nested| {
+            try e.print("{s}.descriptor,\n", .{nested.name});
+        }
+        e.indent_level -= 1;
+        try e.print("}},\n", .{});
+    }
+
+    // Nested enums
+    if (msg.nested_enums.len > 0) {
+        try e.print(".nested_enums = &.{{\n", .{});
+        e.indent_level += 1;
+        for (msg.nested_enums) |nested_enum| {
+            try e.print("{s}.descriptor,\n", .{nested_enum.name});
+        }
+        e.indent_level -= 1;
+        try e.print("}},\n", .{});
+    }
+
+    // Maps
+    if (msg.maps.len > 0) {
+        try e.print(".maps = &.{{\n", .{});
+        e.indent_level += 1;
+        for (msg.maps) |map_field| {
+            try emit_map_field_descriptor(e, map_field);
+        }
+        e.indent_level -= 1;
+        try e.print("}},\n", .{});
+    }
+
+    e.indent_level -= 1;
+    try e.print("}};\n", .{});
+}
+
+fn emit_field_descriptor(e: *Emitter, field: ast.Field) !void {
+    try e.print(".{{ .name = \"{s}\", .number = {d}, .field_type = ", .{ field.name, field.number });
+    switch (field.type_name) {
+        .scalar => |s| try e.print_raw("{s}", .{types.scalar_descriptor_type(s)}),
+        .named => try e.print_raw(".message", .{}),
+        .enum_ref => try e.print_raw(".enum_type", .{}),
+    }
+    try e.print_raw(", .label = ", .{});
+    switch (field.label) {
+        .implicit => try e.print_raw(".implicit", .{}),
+        .optional => try e.print_raw(".optional", .{}),
+        .required => try e.print_raw(".required", .{}),
+        .repeated => try e.print_raw(".repeated", .{}),
+    }
+    // Type name for message/enum refs
+    switch (field.type_name) {
+        .named => |name| try e.print_raw(", .type_name = \"{s}\"", .{name}),
+        .enum_ref => |name| try e.print_raw(", .type_name = \"{s}\"", .{name}),
+        .scalar => {},
+    }
+    // JSON name
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(field.name, field.options, &json_name_buf);
+    if (!std.mem.eql(u8, jname, field.name)) {
+        try e.print_raw(", .json_name = \"{s}\"", .{jname});
+    }
+    // Default value
+    if (types.extract_default(field.options)) |def| {
+        var def_buf: [256]u8 = undefined;
+        const def_str = emit_default_string(def, &def_buf);
+        try e.print_raw(", .default_value = \"{s}\"", .{def_str});
+    }
+    try e.print_raw(" }},\n", .{});
+}
+
+fn emit_oneof_field_descriptor(e: *Emitter, field: ast.Field, oneof_index: u32) !void {
+    try e.print(".{{ .name = \"{s}\", .number = {d}, .field_type = ", .{ field.name, field.number });
+    switch (field.type_name) {
+        .scalar => |s| try e.print_raw("{s}", .{types.scalar_descriptor_type(s)}),
+        .named => try e.print_raw(".message", .{}),
+        .enum_ref => try e.print_raw(".enum_type", .{}),
+    }
+    try e.print_raw(", .label = .optional, .oneof_index = {d}", .{oneof_index});
+    switch (field.type_name) {
+        .named => |name| try e.print_raw(", .type_name = \"{s}\"", .{name}),
+        .enum_ref => |name| try e.print_raw(", .type_name = \"{s}\"", .{name}),
+        .scalar => {},
+    }
+    // JSON name
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(field.name, field.options, &json_name_buf);
+    if (!std.mem.eql(u8, jname, field.name)) {
+        try e.print_raw(", .json_name = \"{s}\"", .{jname});
+    }
+    try e.print_raw(" }},\n", .{});
+}
+
+fn emit_group_field_descriptor(e: *Emitter, group: ast.Group) !void {
+    try e.print(".{{ .name = \"{s}\", .number = {d}, .field_type = .group, .label = ", .{ group.name, group.number });
+    switch (group.label) {
+        .implicit => try e.print_raw(".implicit", .{}),
+        .optional => try e.print_raw(".optional", .{}),
+        .required => try e.print_raw(".required", .{}),
+        .repeated => try e.print_raw(".repeated", .{}),
+    }
+    try e.print_raw(", .type_name = \"{s}\"", .{group.name});
+    try e.print_raw(" }},\n", .{});
+}
+
+fn emit_map_field_descriptor(e: *Emitter, map_field: ast.MapField) !void {
+    try e.print(".{{ .name = \"{s}\", .number = {d}, .entry = .{{ .key_type = {s}, .value_type = ", .{
+        map_field.name,
+        map_field.number,
+        types.scalar_descriptor_type(map_field.key_type),
+    });
+    switch (map_field.value_type) {
+        .scalar => |s| try e.print_raw("{s}", .{types.scalar_descriptor_type(s)}),
+        .named => try e.print_raw(".message", .{}),
+        .enum_ref => try e.print_raw(".enum_type", .{}),
+    }
+    switch (map_field.value_type) {
+        .named => |name| try e.print_raw(", .value_type_name = \"{s}\"", .{name}),
+        .enum_ref => |name| try e.print_raw(", .value_type_name = \"{s}\"", .{name}),
+        .scalar => {},
+    }
+    try e.print_raw(" }} }},\n", .{});
+}
+
+fn emit_group_descriptor(e: *Emitter, group: ast.Group, full_name: []const u8) !void {
+    try e.print("pub const descriptor = protobuf.descriptor.MessageDescriptor{{\n", .{});
+    e.indent_level += 1;
+    try e.print(".name = \"{s}\",\n", .{group.name});
+    try e.print(".full_name = \"{s}\",\n", .{full_name});
+
+    // Fields
+    try e.print(".fields = &.{{\n", .{});
+    e.indent_level += 1;
+    for (group.fields) |field| {
+        try emit_field_descriptor(e, field);
+    }
+    e.indent_level -= 1;
+    try e.print("}},\n", .{});
+
+    // Nested messages
+    if (group.nested_messages.len > 0) {
+        try e.print(".nested_messages = &.{{\n", .{});
+        e.indent_level += 1;
+        for (group.nested_messages) |nested| {
+            try e.print("{s}.descriptor,\n", .{nested.name});
+        }
+        e.indent_level -= 1;
+        try e.print("}},\n", .{});
+    }
+
+    // Nested enums
+    if (group.nested_enums.len > 0) {
+        try e.print(".nested_enums = &.{{\n", .{});
+        e.indent_level += 1;
+        for (group.nested_enums) |nested_enum| {
+            try e.print("{s}.descriptor,\n", .{nested_enum.name});
+        }
+        e.indent_level -= 1;
+        try e.print("}},\n", .{});
+    }
+
+    e.indent_level -= 1;
+    try e.print("}};\n", .{});
+}
+
+/// Convert a Constant to its string representation for default_value in descriptors.
+fn emit_default_string(constant: ast.Constant, buf: []u8) []const u8 {
+    switch (constant) {
+        .integer => |n| return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable,
+        .unsigned_integer => |n| return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable,
+        .float_value => |f| return std.fmt.bufPrint(buf, "{d}", .{f}) catch unreachable,
+        .bool_value => |b| return if (b) "true" else "false",
+        .string_value => |s| return s,
+        .identifier => |id| return id,
+        .aggregate => return "",
+    }
 }
 
 fn emit_field(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
@@ -191,20 +418,24 @@ fn emit_getter_method(e: *Emitter, field: ast.Field, def: ast.Constant) !void {
     try e.close_brace_nosemi();
 }
 
-fn emit_group_struct(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+fn emit_group_struct(e: *Emitter, group: ast.Group, syntax: ast.Syntax, full_name: []const u8) !void {
     // Groups are like mini-messages: emit as nested struct
     try e.print("pub const {s} = struct", .{group.name});
     try e.open_brace();
 
     // Nested enums
     for (group.nested_enums) |nested_enum| {
-        try enums.emit_enum(e, nested_enum, syntax);
+        var name_buf: [512]u8 = undefined;
+        const nested_full = std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ full_name, nested_enum.name }) catch unreachable;
+        try enums.emit_enum(e, nested_enum, syntax, nested_full);
         try e.blank_line();
     }
 
     // Nested messages
     for (group.nested_messages) |nested_msg| {
-        try emit_message(e, nested_msg, syntax);
+        var name_buf: [512]u8 = undefined;
+        const nested_full = std.fmt.bufPrint(&name_buf, "{s}.{s}", .{ full_name, nested_msg.name }) catch unreachable;
+        try emit_message(e, nested_msg, syntax, nested_full);
         try e.blank_line();
     }
 
@@ -215,6 +446,10 @@ fn emit_group_struct(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
 
     // Unknown fields
     try e.print("_unknown_fields: []const u8 = \"\",\n", .{});
+
+    // Descriptor
+    try e.blank_line();
+    try emit_group_descriptor(e, group, full_name);
 
     // Encode method (same as message encode but without unknown fields tracking on output)
     try e.blank_line();
@@ -3406,7 +3641,7 @@ test "emit_message: proto3 implicit scalar fields" {
     var msg = make_msg("Person");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub const Person = struct {");
     try expect_output_contains(output, "    name: []const u8 = \"\",");
@@ -3427,7 +3662,7 @@ test "emit_message: proto3 optional field" {
     var msg = make_msg("User");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "    email: ?[]const u8 = null,");
 }
@@ -3444,7 +3679,7 @@ test "emit_message: proto2 required/optional fields" {
     var msg = make_msg("LegacyUser");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto2);
+    try emit_message(&e, msg, .proto2, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "    name: []const u8 = \"\",");
     try expect_output_contains(output, "    email: ?[]const u8 = null,");
@@ -3468,7 +3703,7 @@ test "emit_message: oneof field" {
     var msg = make_msg("Sample");
     msg.oneofs = &oneofs;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub const Value = union(enum)");
     try expect_output_contains(output, "        text: []const u8,");
@@ -3502,7 +3737,7 @@ test "emit_message: map fields" {
     var msg = make_msg("Container");
     msg.maps = &maps;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "    labels: std.StringArrayHashMapUnmanaged([]const u8) = .empty,");
     try expect_output_contains(output, "    scores: std.AutoArrayHashMapUnmanaged(i32, f32) = .empty,");
@@ -3539,7 +3774,7 @@ test "emit_message: nested message and enum" {
     msg.nested_enums = &nested_enums;
     msg.nested_messages = &nested_msgs;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub const Kind = enum(i32)");
     try expect_output_contains(output, "pub const Inner = struct {");
@@ -3557,7 +3792,7 @@ test "emit_message: field with Zig keyword name" {
     var msg = make_msg("KeywordTest");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "    @\"type\": i32 = 0,");
     try expect_output_contains(output, "    @\"error\": ?[]const u8 = null,");
@@ -3576,7 +3811,7 @@ test "emit_message: repeated fields" {
     var msg = make_msg("Collection");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "    ids: []const i32 = &.{},");
     try expect_output_contains(output, "    names: []const []const u8 = &.{},");
@@ -3595,7 +3830,7 @@ test "emit_message: encode method for simple scalar message" {
     var msg = make_msg("Simple");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub fn encode(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {");
     try expect_output_contains(output, "const mw = message.MessageWriter.init(writer);");
@@ -3615,7 +3850,7 @@ test "emit_message: calc_size method" {
     var msg = make_msg("Simple");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub fn calc_size(self: @This()) usize {");
     try expect_output_contains(output, "var size: usize = 0;");
@@ -3636,7 +3871,7 @@ test "emit_message: decode method" {
     var msg = make_msg("Simple");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !@This() {");
     try expect_output_contains(output, "var result: @This() = .{};");
@@ -3658,7 +3893,7 @@ test "emit_message: deinit method" {
     var msg = make_msg("WithDeinit");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {");
     try expect_output_contains(output, "if (self.name.len > 0) allocator.free(self.name);");
@@ -3684,7 +3919,7 @@ test "emit_message: oneof encode/decode/deinit" {
     var msg = make_msg("OneofMsg");
     msg.oneofs = &oneofs;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     // Encode: switch on oneof variants
     try expect_output_contains(output, "if (self.payload) |oneof_val| switch (oneof_val)");
@@ -3710,7 +3945,7 @@ test "emit_message: to_json method signature" {
     var msg = make_msg("Simple");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub fn to_json(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {");
     try expect_output_contains(output, "try json.write_object_start(writer);");
@@ -3729,7 +3964,7 @@ test "emit_message: to_json snake_case to camelCase" {
     var msg = make_msg("CamelTest");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     // JSON name should be camelCase
     try expect_output_contains(output, "try json.write_field_name(writer, \"myFieldName\");");
@@ -3747,7 +3982,7 @@ test "emit_message: to_json int64 uses write_int_string" {
     var msg = make_msg("Int64Test");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     // int64 -> write_int_string (as JSON string)
     try expect_output_contains(output, "try json.write_int_string(writer,");
@@ -3769,7 +4004,7 @@ test "emit_message: to_json scalar types use correct write functions" {
     var msg = make_msg("ScalarJson");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "try json.write_float(writer, self.d);");
     try expect_output_contains(output, "try json.write_bool(writer, self.b);");
@@ -3788,7 +4023,7 @@ test "emit_message: to_json optional field null check" {
     var msg = make_msg("OptTest");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "if (self.opt) |v| {");
     try expect_output_contains(output, "try json.write_field_name(writer, \"opt\");");
@@ -3805,7 +4040,7 @@ test "emit_message: to_json repeated field array pattern" {
     var msg = make_msg("RepTest");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "if (self.tags.len > 0) {");
     try expect_output_contains(output, "try json.write_array_start(writer);");
@@ -3824,7 +4059,7 @@ test "emit_message: to_json nested message" {
     var msg = make_msg("NestedJson");
     msg.fields = &fields;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "if (self.sub) |sub| {");
     try expect_output_contains(output, "try sub.to_json(writer);");
@@ -3846,7 +4081,7 @@ test "emit_message: to_json map field" {
     var msg = make_msg("MapJson");
     msg.maps = &maps;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "if (self.labels.count() > 0) {");
     try expect_output_contains(output, "try json.write_object_start(writer);");
@@ -3872,7 +4107,7 @@ test "emit_message: to_json oneof field" {
     var msg = make_msg("OneofJson");
     msg.oneofs = &oneofs;
 
-    try emit_message(&e, msg, .proto3);
+    try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     // The to_json should switch on oneof
     try expect_output_contains(output, "if (self.kind) |oneof_val| switch (oneof_val) {");
