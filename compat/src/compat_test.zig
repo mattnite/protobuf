@@ -40,6 +40,9 @@ fn decode_msg(comptime T: type, data: []const u8) !T {
 }
 
 fn write_test_vectors(comptime _: type, cases: anytype, path: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
     var file = try std.fs.cwd().createFile(path, .{});
     defer file.close();
 
