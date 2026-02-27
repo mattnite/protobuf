@@ -66,6 +66,8 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
     try emit_decode_method(e, msg, syntax);
     try e.blank_line();
     try emit_deinit_method(e, msg, syntax);
+    try e.blank_line();
+    try emit_to_json_method(e, msg, syntax);
 
     try e.close_brace();
 }
@@ -992,6 +994,339 @@ fn emit_deinit_oneof(e: *Emitter, oneof: ast.Oneof) !void {
     try e.close_brace();
 }
 
+// ── JSON Serialization Method ──────────────────────────────────────────
+
+fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    try e.print("pub fn to_json(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
+    try e.open_brace();
+    try e.print("try json.write_object_start(writer);\n", .{});
+    try e.print("var first = true;\n", .{});
+
+    const items = try collect_all_fields(e.allocator, msg);
+    defer e.allocator.free(items);
+
+    for (items) |item| {
+        switch (item) {
+            .field => |f| try emit_json_field(e, f, syntax),
+            .map => |m| try emit_json_map(e, m),
+            .oneof => |o| try emit_json_oneof(e, o),
+        }
+    }
+
+    try e.print("try json.write_object_end(writer);\n", .{});
+    try e.close_brace_nosemi();
+}
+
+fn json_field_name(field_name: []const u8, options: []const ast.FieldOption, buf: []u8) []const u8 {
+    // Check for explicit json_name option
+    for (options) |opt| {
+        if (opt.name.parts.len == 1 and !opt.name.parts[0].is_extension and std.mem.eql(u8, opt.name.parts[0].name, "json_name")) {
+            switch (opt.value) {
+                .string_value => |s| return s,
+                else => {},
+            }
+        }
+    }
+    // Default: convert snake_case to lowerCamelCase
+    return types.snake_to_lower_camel(field_name, buf);
+}
+
+fn emit_json_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
+    const escaped = types.escape_zig_keyword(field.name);
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(field.name, field.options, &json_name_buf);
+
+    switch (field.type_name) {
+        .scalar => |s| {
+            const write_fn = types.scalar_json_write_fn(s);
+            switch (field.label) {
+                .implicit => {
+                    // Proto3 implicit: skip if default
+                    if (s == .string or s == .bytes) {
+                        try e.print("if (self.{f}.len > 0)", .{escaped});
+                        try e.open_brace();
+                        try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                        try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                        try e.print("try json.{s}(writer, self.{f});\n", .{ write_fn, escaped });
+                        try e.close_brace_nosemi();
+                    } else if (s == .bool) {
+                        try e.print("if (self.{f})", .{escaped});
+                        try e.open_brace();
+                        try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                        try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                        try e.print("try json.write_bool(writer, self.{f});\n", .{escaped});
+                        try e.close_brace_nosemi();
+                    } else if (s == .double or s == .float) {
+                        try e.print("if (self.{f} != 0)", .{escaped});
+                        try e.open_brace();
+                        try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                        try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                        try e.print("try json.write_float(writer, self.{f});\n", .{escaped});
+                        try e.close_brace_nosemi();
+                    } else {
+                        // integer types
+                        try e.print("if (self.{f} != 0)", .{escaped});
+                        try e.open_brace();
+                        try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                        try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                        try emit_json_scalar_write(e, write_fn, s, escaped);
+                        try e.close_brace_nosemi();
+                    }
+                },
+                .optional => {
+                    try e.print("if (self.{f}) |v|", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try emit_json_scalar_write_val(e, write_fn, s);
+                    try e.close_brace_nosemi();
+                },
+                .required => {
+                    _ = syntax;
+                    try e.print("{{\n", .{});
+                    e.indent_level += 1;
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try emit_json_scalar_write(e, write_fn, s, escaped);
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
+                },
+                .repeated => {
+                    try e.print("if (self.{f}.len > 0)", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try json.write_array_start(writer);\n", .{});
+                    try e.print("for (self.{f}, 0..) |item, i|", .{escaped});
+                    try e.open_brace();
+                    try e.print("if (i > 0) try writer.writeByte(',');\n", .{});
+                    try emit_json_scalar_write_item(e, write_fn, s);
+                    try e.close_brace_nosemi();
+                    try e.print("try json.write_array_end(writer);\n", .{});
+                    try e.close_brace_nosemi();
+                },
+            }
+        },
+        .named => {
+            switch (field.label) {
+                .repeated => {
+                    try e.print("if (self.{f}.len > 0)", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try json.write_array_start(writer);\n", .{});
+                    try e.print("for (self.{f}, 0..) |item, i|", .{escaped});
+                    try e.open_brace();
+                    try e.print("if (i > 0) try writer.writeByte(',');\n", .{});
+                    try e.print("try item.to_json(writer);\n", .{});
+                    try e.close_brace_nosemi();
+                    try e.print("try json.write_array_end(writer);\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .optional, .implicit => {
+                    try e.print("if (self.{f}) |sub|", .{escaped});
+                    try e.open_brace();
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try sub.to_json(writer);\n", .{});
+                    try e.close_brace_nosemi();
+                },
+                .required => {
+                    try e.print("{{\n", .{});
+                    e.indent_level += 1;
+                    try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                    try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                    try e.print("try self.{f}.to_json(writer);\n", .{escaped});
+                    e.indent_level -= 1;
+                    try e.print("}}\n", .{});
+                },
+            }
+        },
+    }
+}
+
+fn emit_json_scalar_write(e: *Emitter, write_fn: []const u8, s: ast.ScalarType, escaped: types.EscapedName) !void {
+    // For int types that need casting
+    switch (s) {
+        .int32, .sint32, .sfixed32 => {
+            try e.print("try json.{s}(writer, @as(i64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .int64, .sint64, .sfixed64 => {
+            try e.print("try json.{s}(writer, @as(i64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .uint32 => {
+            try e.print("try json.write_int(writer, @as(i64, self.{f}));\n", .{escaped});
+        },
+        .uint64, .fixed64 => {
+            try e.print("try json.{s}(writer, @as(u64, self.{f}));\n", .{ write_fn, escaped });
+        },
+        .fixed32 => {
+            try e.print("try json.write_int(writer, @as(i64, self.{f}));\n", .{escaped});
+        },
+        .double, .float, .bool, .string, .bytes => {
+            try e.print("try json.{s}(writer, self.{f});\n", .{ write_fn, escaped });
+        },
+    }
+}
+
+fn emit_json_scalar_write_val(e: *Emitter, write_fn: []const u8, s: ast.ScalarType) !void {
+    switch (s) {
+        .int32, .sint32, .sfixed32 => {
+            try e.print("try json.{s}(writer, @as(i64, v));\n", .{write_fn});
+        },
+        .int64, .sint64, .sfixed64 => {
+            try e.print("try json.{s}(writer, @as(i64, v));\n", .{write_fn});
+        },
+        .uint32, .fixed32 => {
+            try e.print("try json.write_int(writer, @as(i64, v));\n", .{});
+        },
+        .uint64, .fixed64 => {
+            try e.print("try json.{s}(writer, @as(u64, v));\n", .{write_fn});
+        },
+        .double, .float, .bool, .string, .bytes => {
+            try e.print("try json.{s}(writer, v);\n", .{write_fn});
+        },
+    }
+}
+
+fn emit_json_scalar_write_item(e: *Emitter, write_fn: []const u8, s: ast.ScalarType) !void {
+    switch (s) {
+        .int32, .sint32, .sfixed32 => {
+            try e.print("try json.{s}(writer, @as(i64, item));\n", .{write_fn});
+        },
+        .int64, .sint64, .sfixed64 => {
+            try e.print("try json.{s}(writer, @as(i64, item));\n", .{write_fn});
+        },
+        .uint32, .fixed32 => {
+            try e.print("try json.write_int(writer, @as(i64, item));\n", .{});
+        },
+        .uint64, .fixed64 => {
+            try e.print("try json.{s}(writer, @as(u64, item));\n", .{write_fn});
+        },
+        .double, .float, .bool, .string, .bytes => {
+            try e.print("try json.{s}(writer, item);\n", .{write_fn});
+        },
+    }
+}
+
+fn emit_json_map(e: *Emitter, map_field: ast.MapField) !void {
+    const escaped = types.escape_zig_keyword(map_field.name);
+    var json_name_buf: [256]u8 = undefined;
+    const jname = json_field_name(map_field.name, map_field.options, &json_name_buf);
+
+    if (types.is_string_key(map_field.key_type)) {
+        try e.print("if (self.{f}.count() > 0)", .{escaped});
+        try e.open_brace();
+        try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+        try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+        try e.print("try json.write_object_start(writer);\n", .{});
+        try e.print("var map_first = true;\n", .{});
+        try e.print("for (self.{f}.keys(), self.{f}.values()) |key, val|", .{ escaped, escaped });
+        try e.open_brace();
+        try e.print("map_first = try json.write_field_sep(writer, map_first);\n", .{});
+        try e.print("try json.write_field_name(writer, key);\n", .{});
+        try emit_json_map_value(e, map_field.value_type);
+        try e.close_brace_nosemi();
+        try e.print("try json.write_object_end(writer);\n", .{});
+        try e.close_brace_nosemi();
+    } else {
+        // Non-string keys: proto-JSON represents as object with string keys
+        try e.print("if (self.{f}.count() > 0)", .{escaped});
+        try e.open_brace();
+        try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+        try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+        try e.print("try json.write_object_start(writer);\n", .{});
+        try e.print("var map_first = true;\n", .{});
+        try e.print("for (self.{f}.keys(), self.{f}.values()) |key, val|", .{ escaped, escaped });
+        try e.open_brace();
+        try e.print("map_first = try json.write_field_sep(writer, map_first);\n", .{});
+        // Convert numeric key to string representation
+        try e.print("try writer.writeByte('\"');\n", .{});
+        try e.print("try writer.print(\"{{d}}\", .{{key}});\n", .{});
+        try e.print("try writer.writeAll(\"\\\":\");\n", .{});
+        try emit_json_map_value(e, map_field.value_type);
+        try e.close_brace_nosemi();
+        try e.print("try json.write_object_end(writer);\n", .{});
+        try e.close_brace_nosemi();
+    }
+}
+
+fn emit_json_map_value(e: *Emitter, value_type: ast.TypeRef) !void {
+    switch (value_type) {
+        .scalar => |s| {
+            const write_fn = types.scalar_json_write_fn(s);
+            switch (s) {
+                .int32, .sint32, .sfixed32 => {
+                    try e.print("try json.{s}(writer, @as(i64, val));\n", .{write_fn});
+                },
+                .int64, .sint64, .sfixed64 => {
+                    try e.print("try json.{s}(writer, @as(i64, val));\n", .{write_fn});
+                },
+                .uint32, .fixed32 => {
+                    try e.print("try json.write_int(writer, @as(i64, val));\n", .{});
+                },
+                .uint64, .fixed64 => {
+                    try e.print("try json.{s}(writer, @as(u64, val));\n", .{write_fn});
+                },
+                .double, .float, .bool, .string, .bytes => {
+                    try e.print("try json.{s}(writer, val);\n", .{write_fn});
+                },
+            }
+        },
+        .named => {
+            try e.print("try val.to_json(writer);\n", .{});
+        },
+    }
+}
+
+fn emit_json_oneof(e: *Emitter, oneof: ast.Oneof) !void {
+    const escaped = types.escape_zig_keyword(oneof.name);
+    try e.print("if (self.{f}) |oneof_val| switch (oneof_val)", .{escaped});
+    try e.open_brace();
+    for (oneof.fields) |field| {
+        const field_escaped = types.escape_zig_keyword(field.name);
+        var json_name_buf: [256]u8 = undefined;
+        const jname = json_field_name(field.name, field.options, &json_name_buf);
+
+        switch (field.type_name) {
+            .scalar => |s| {
+                const write_fn = types.scalar_json_write_fn(s);
+                try e.print(".{f} => |v|", .{field_escaped});
+                try e.open_brace();
+                try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                switch (s) {
+                    .int32, .sint32, .sfixed32 => {
+                        try e.print("try json.{s}(writer, @as(i64, v));\n", .{write_fn});
+                    },
+                    .int64, .sint64, .sfixed64 => {
+                        try e.print("try json.{s}(writer, @as(i64, v));\n", .{write_fn});
+                    },
+                    .uint32, .fixed32 => {
+                        try e.print("try json.write_int(writer, @as(i64, v));\n", .{});
+                    },
+                    .uint64, .fixed64 => {
+                        try e.print("try json.{s}(writer, @as(u64, v));\n", .{write_fn});
+                    },
+                    .double, .float, .bool, .string, .bytes => {
+                        try e.print("try json.{s}(writer, v);\n", .{write_fn});
+                    },
+                }
+                try e.close_brace_nosemi();
+            },
+            .named => {
+                try e.print(".{f} => |sub|", .{field_escaped});
+                try e.open_brace();
+                try e.print("first = try json.write_field_sep(writer, first);\n", .{});
+                try e.print("try json.write_field_name(writer, \"{s}\");\n", .{jname});
+                try e.print("try sub.to_json(writer);\n", .{});
+                try e.close_brace_nosemi();
+            },
+        }
+    }
+    try e.close_brace();
+}
+
 // ── Field Collection Helper ───────────────────────────────────────────
 
 const FieldItem = union(enum) {
@@ -1376,4 +1711,190 @@ test "emit_message: oneof encode/decode/deinit" {
     // Deinit: switch
     try expect_output_contains(output, "if (self.payload) |*oneof_val| switch (oneof_val.*)");
     try expect_output_contains(output, ".text => |v| allocator.free(v),");
+}
+
+// ── to_json tests ─────────────────────────────────────────────────────
+
+test "emit_message: to_json method signature" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("name", 1, .implicit, .{ .scalar = .string }),
+        make_field("id", 2, .implicit, .{ .scalar = .int32 }),
+    };
+
+    var msg = make_msg("Simple");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    try expect_output_contains(output, "pub fn to_json(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {");
+    try expect_output_contains(output, "try json.write_object_start(writer);");
+    try expect_output_contains(output, "var first = true;");
+    try expect_output_contains(output, "try json.write_object_end(writer);");
+}
+
+test "emit_message: to_json snake_case to camelCase" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("my_field_name", 1, .implicit, .{ .scalar = .string }),
+    };
+
+    var msg = make_msg("CamelTest");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    // JSON name should be camelCase
+    try expect_output_contains(output, "try json.write_field_name(writer, \"myFieldName\");");
+}
+
+test "emit_message: to_json int64 uses write_int_string" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("big_int", 1, .implicit, .{ .scalar = .int64 }),
+        make_field("big_uint", 2, .implicit, .{ .scalar = .uint64 }),
+    };
+
+    var msg = make_msg("Int64Test");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    // int64 -> write_int_string (as JSON string)
+    try expect_output_contains(output, "try json.write_int_string(writer,");
+    // uint64 -> write_uint_string (as JSON string)
+    try expect_output_contains(output, "try json.write_uint_string(writer,");
+}
+
+test "emit_message: to_json scalar types use correct write functions" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("d", 1, .implicit, .{ .scalar = .double }),
+        make_field("b", 2, .implicit, .{ .scalar = .bool }),
+        make_field("s", 3, .implicit, .{ .scalar = .string }),
+        make_field("raw", 4, .implicit, .{ .scalar = .bytes }),
+    };
+
+    var msg = make_msg("ScalarJson");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    try expect_output_contains(output, "try json.write_float(writer, self.d);");
+    try expect_output_contains(output, "try json.write_bool(writer, self.b);");
+    try expect_output_contains(output, "try json.write_string(writer, self.s);");
+    try expect_output_contains(output, "try json.write_bytes(writer, self.raw);");
+}
+
+test "emit_message: to_json optional field null check" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("opt", 1, .optional, .{ .scalar = .int32 }),
+    };
+
+    var msg = make_msg("OptTest");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    try expect_output_contains(output, "if (self.opt) |v| {");
+    try expect_output_contains(output, "try json.write_field_name(writer, \"opt\");");
+}
+
+test "emit_message: to_json repeated field array pattern" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("tags", 1, .repeated, .{ .scalar = .string }),
+    };
+
+    var msg = make_msg("RepTest");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    try expect_output_contains(output, "if (self.tags.len > 0) {");
+    try expect_output_contains(output, "try json.write_array_start(writer);");
+    try expect_output_contains(output, "try json.write_string(writer, item);");
+    try expect_output_contains(output, "try json.write_array_end(writer);");
+}
+
+test "emit_message: to_json nested message" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var fields = [_]ast.Field{
+        make_field("sub", 1, .implicit, .{ .named = "SubMsg" }),
+    };
+
+    var msg = make_msg("NestedJson");
+    msg.fields = &fields;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    try expect_output_contains(output, "if (self.sub) |sub| {");
+    try expect_output_contains(output, "try sub.to_json(writer);");
+}
+
+test "emit_message: to_json map field" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var maps = [_]ast.MapField{.{
+        .name = "labels",
+        .number = 1,
+        .key_type = .string,
+        .value_type = .{ .scalar = .string },
+        .options = &.{},
+        .location = loc,
+    }};
+
+    var msg = make_msg("MapJson");
+    msg.maps = &maps;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    try expect_output_contains(output, "if (self.labels.count() > 0) {");
+    try expect_output_contains(output, "try json.write_object_start(writer);");
+    try expect_output_contains(output, "try json.write_field_name(writer, key);");
+    try expect_output_contains(output, "try json.write_object_end(writer);");
+}
+
+test "emit_message: to_json oneof field" {
+    var e = Emitter.init(testing.allocator);
+    defer e.deinit();
+
+    var oneof_fields = [_]ast.Field{
+        make_field("text", 1, .implicit, .{ .scalar = .string }),
+        make_field("sub_msg", 2, .implicit, .{ .named = "SubMsg" }),
+    };
+    var oneofs = [_]ast.Oneof{.{
+        .name = "kind",
+        .fields = &oneof_fields,
+        .options = &.{},
+        .location = loc,
+    }};
+
+    var msg = make_msg("OneofJson");
+    msg.oneofs = &oneofs;
+
+    try emit_message(&e, msg, .proto3);
+    const output = e.get_output();
+    // The to_json should switch on oneof
+    try expect_output_contains(output, "if (self.kind) |oneof_val| switch (oneof_val) {");
+    try expect_output_contains(output, ".text => |v| {");
+    try expect_output_contains(output, "try json.write_string(writer, v);");
+    try expect_output_contains(output, ".sub_msg => |sub| {");
+    try expect_output_contains(output, "try sub.to_json(writer);");
 }

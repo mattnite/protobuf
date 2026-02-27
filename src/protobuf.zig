@@ -3,6 +3,7 @@ pub const message = @import("message.zig");
 pub const proto = @import("proto.zig");
 pub const codegen = @import("codegen.zig");
 pub const rpc = @import("rpc.zig");
+pub const json = @import("json.zig");
 
 test {
     _ = encoding;
@@ -10,4 +11,5 @@ test {
     _ = proto;
     _ = codegen;
     _ = rpc;
+    _ = json;
 }

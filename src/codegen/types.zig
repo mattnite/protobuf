@@ -175,6 +175,53 @@ pub fn is_string_key(key_type: ScalarType) bool {
     return key_type == .string;
 }
 
+/// Converts a proto snake_case name to lowerCamelCase for JSON field names.
+/// E.g. "my_field_name" -> "myFieldName", "name" -> "name", "_foo" -> "Foo"
+pub fn snake_to_lower_camel(name: []const u8, buf: []u8) []const u8 {
+    var len: usize = 0;
+    var capitalize_next = false;
+    for (name) |c| {
+        if (c == '_') {
+            capitalize_next = true;
+        } else {
+            if (len >= buf.len) break;
+            if (capitalize_next) {
+                buf[len] = std.ascii.toUpper(c);
+                capitalize_next = false;
+            } else {
+                buf[len] = c;
+            }
+            len += 1;
+        }
+    }
+    return buf[0..len];
+}
+
+/// Returns the json.write_* function name for a scalar type.
+pub fn scalar_json_write_fn(s: ScalarType) []const u8 {
+    return switch (s) {
+        .double, .float => "write_float",
+        .int32, .sint32, .uint32, .fixed32, .sfixed32 => "write_int",
+        .int64, .sint64, .sfixed64 => "write_int_string",
+        .uint64, .fixed64 => "write_uint_string",
+        .bool => "write_bool",
+        .string => "write_string",
+        .bytes => "write_bytes",
+    };
+}
+
+/// Returns the json write expression for converting a Zig value to the appropriate
+/// json.write_* call argument type.
+pub fn scalar_json_value_expr(s: ScalarType, val_expr: []const u8, buf: []u8) []const u8 {
+    return switch (s) {
+        .int32, .sint32, .sfixed32 => std.fmt.bufPrint(buf, "@as(i64, {s})", .{val_expr}) catch unreachable,
+        .int64, .sint64, .sfixed64 => std.fmt.bufPrint(buf, "@as(i64, {s})", .{val_expr}) catch unreachable,
+        .uint32 => std.fmt.bufPrint(buf, "@as(u64, {s})", .{val_expr}) catch unreachable,
+        .uint64, .fixed32, .fixed64 => std.fmt.bufPrint(buf, "@as(u64, {s})", .{val_expr}) catch unreachable,
+        .double, .float, .bool, .string, .bytes => val_expr,
+    };
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Tests
 // ══════════════════════════════════════════════════════════════════════
@@ -275,4 +322,36 @@ test "scalar_decode_expr: representative types" {
     try testing.expectEqualStrings("@bitCast(field.value.i64)", scalar_decode_expr(.double));
     try testing.expectEqualStrings("field.value.i32", scalar_decode_expr(.fixed32));
     try testing.expectEqualStrings("field.value.len", scalar_decode_expr(.string));
+}
+
+test "snake_to_lower_camel: single word" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("name", snake_to_lower_camel("name", &buf));
+}
+
+test "snake_to_lower_camel: multi word" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("myFieldName", snake_to_lower_camel("my_field_name", &buf));
+}
+
+test "snake_to_lower_camel: leading underscore" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("Foo", snake_to_lower_camel("_foo", &buf));
+}
+
+test "snake_to_lower_camel: double underscore" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("aB", snake_to_lower_camel("a__b", &buf));
+}
+
+test "scalar_json_write_fn: type mapping" {
+    try testing.expectEqualStrings("write_int", scalar_json_write_fn(.int32));
+    try testing.expectEqualStrings("write_int_string", scalar_json_write_fn(.int64));
+    try testing.expectEqualStrings("write_uint_string", scalar_json_write_fn(.uint64));
+    try testing.expectEqualStrings("write_uint_string", scalar_json_write_fn(.fixed64));
+    try testing.expectEqualStrings("write_float", scalar_json_write_fn(.double));
+    try testing.expectEqualStrings("write_float", scalar_json_write_fn(.float));
+    try testing.expectEqualStrings("write_bool", scalar_json_write_fn(.bool));
+    try testing.expectEqualStrings("write_string", scalar_json_write_fn(.string));
+    try testing.expectEqualStrings("write_bytes", scalar_json_write_fn(.bytes));
 }

@@ -20,6 +20,9 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File) ![]const u8 {
     try e.print("const protobuf = @import(\"protobuf\");\n", .{});
     try e.print("const encoding = protobuf.encoding;\n", .{});
     try e.print("const message = protobuf.message;\n", .{});
+    if (file.messages.len > 0) {
+        try e.print("const json = protobuf.json;\n", .{});
+    }
     try e.blank_line();
 
     // Top-level enums
@@ -533,6 +536,37 @@ test "generate_file: no rpc import without services" {
 
     // Should NOT contain rpc import when there are no services
     if (std.mem.indexOf(u8, output, "const rpc = protobuf.rpc;") != null) {
+        return error.TestExpectedEqual;
+    }
+}
+
+test "generate_file: json import when messages present" {
+    var msg_fields = [_]ast.Field{
+        make_field("name", 1, .implicit, .{ .scalar = .string }),
+    };
+    var file_msgs = [_]ast.Message{blk: {
+        var m = make_msg("Msg");
+        m.fields = &msg_fields;
+        break :blk m;
+    }};
+
+    var file = make_file(.proto3);
+    file.messages = &file_msgs;
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    try expect_contains(output, "const json = protobuf.json;");
+    try expect_contains(output, "pub fn to_json(");
+}
+
+test "generate_file: no json import without messages" {
+    const file = make_file(.proto3);
+
+    const output = try generate_file(testing.allocator, file);
+    defer testing.allocator.free(output);
+
+    if (std.mem.indexOf(u8, output, "const json = protobuf.json;") != null) {
         return error.TestExpectedEqual;
     }
 }

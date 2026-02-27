@@ -8,6 +8,7 @@ const GenerateStep = @This();
 step: std.Build.Step,
 proto_sources: std.Build.LazyPath,
 import_paths: []const std.Build.LazyPath,
+well_known_path: std.Build.LazyPath,
 generated_directory: std.Build.GeneratedFile,
 protobuf_mod: *std.Build.Module,
 
@@ -29,6 +30,7 @@ pub fn create(b: *std.Build, proto_dep: *std.Build.Dependency, options: Options)
         }),
         .proto_sources = options.proto_sources,
         .import_paths = b.allocator.dupe(std.Build.LazyPath, options.import_paths) catch @panic("OOM"),
+        .well_known_path = proto_dep.path("src/well_known_protos"),
         .generated_directory = .{ .step = &self.step },
         .protobuf_mod = undefined,
     };
@@ -52,6 +54,7 @@ pub fn create(b: *std.Build, proto_dep: *std.Build.Dependency, options: Options)
     for (options.import_paths) |ip| {
         ip.addStepDependencies(&self.step);
     }
+    self.well_known_path.addStepDependencies(&self.step);
 
     return self;
 }
@@ -130,6 +133,17 @@ fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!voi
         try owned_dirs.append(arena, dir);
         try search_dirs.append(arena, dir);
     }
+
+    // Add well-known protos path (after user paths, so user overrides take priority)
+    {
+        const wk = self.well_known_path.getPath3(b, step);
+        const wk_dir = wk.root_dir.handle.openDir(wk.sub_path, .{}) catch |err| {
+            return step.fail("cannot open well-known protos directory: {s}", .{@errorName(err)});
+        };
+        try owned_dirs.append(arena, wk_dir);
+        try search_dirs.append(arena, wk_dir);
+    }
+
     defer for (owned_dirs.items) |*d| {
         d.close();
     };
