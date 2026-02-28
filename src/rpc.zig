@@ -3,6 +3,7 @@ const testing = std.testing;
 
 // ── Status Codes ─────────────────────────────────────────────────────
 
+/// gRPC-compatible status codes
 pub const StatusCode = enum(u5) {
     ok = 0,
     cancelled = 1,
@@ -23,11 +24,13 @@ pub const StatusCode = enum(u5) {
     unauthenticated = 16,
 };
 
+/// RPC status with a code and optional message
 pub const Status = struct {
     code: StatusCode,
     message: []const u8 = "",
 };
 
+/// Errors that can occur during an RPC call
 pub const RpcError = error{
     status_error,
     connection_closed,
@@ -85,14 +88,17 @@ pub fn SendStream(comptime T: type) type {
 
 // ── Context ──────────────────────────────────────────────────────────
 
+/// Collection of key-value metadata entries (headers/trailers)
 pub const Metadata = struct {
     entries: []const Entry,
 
+    /// A single metadata key-value pair
     pub const Entry = struct {
         key: []const u8,
         value: []const u8,
     };
 
+    /// Return the first metadata value matching a key, or null
     pub fn get(self: Metadata, key: []const u8) ?[]const u8 {
         for (self.entries) |entry| {
             if (std.mem.eql(u8, entry.key, key)) return entry.value;
@@ -101,6 +107,7 @@ pub const Metadata = struct {
     }
 };
 
+/// Per-RPC context carrying metadata, deadline, and allocator
 pub const Context = struct {
     /// Metadata from the caller (headers).
     metadata: Metadata = .{ .entries = &.{} },
@@ -153,6 +160,7 @@ pub fn BidiStreamCall(comptime Req: type, comptime Resp: type) type {
 
 // ── Descriptors ──────────────────────────────────────────────────────
 
+/// Descriptor for a single RPC method
 pub const MethodDescriptor = struct {
     /// Short method name (e.g., "GetFeature").
     name: []const u8,
@@ -162,6 +170,7 @@ pub const MethodDescriptor = struct {
     server_streaming: bool,
 };
 
+/// Descriptor for an RPC service
 pub const ServiceDescriptor = struct {
     /// Fully qualified service name (e.g., "routeguide.RouteGuide").
     name: []const u8,
@@ -170,9 +179,12 @@ pub const ServiceDescriptor = struct {
 
 // ── Channel ──────────────────────────────────────────────────────────
 
+/// Type alias for a byte-level receive stream
 pub const RawRecvStream = RecvStream([]const u8);
+/// Type alias for a byte-level send stream
 pub const RawSendStream = SendStream([]const u8);
 
+/// Bidirectional raw byte stream pair
 pub const RawBidiStream = struct {
     recv_stream: RawRecvStream,
     send_stream: RawSendStream,

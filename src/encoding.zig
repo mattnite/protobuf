@@ -3,6 +3,7 @@ const testing = std.testing;
 
 // ── Types ─────────────────────────────────────────────────────────────
 
+/// Protocol Buffers wire type tags
 pub const WireType = enum(u3) {
     varint = 0,
     i64 = 1,
@@ -12,11 +13,13 @@ pub const WireType = enum(u3) {
     i32 = 5,
 };
 
+/// Decoded field tag (field number + wire type)
 pub const Tag = struct {
     field_number: u29,
     wire_type: WireType,
 };
 
+/// Errors that can occur during wire format decoding
 pub const DecodeError = std.Io.Reader.Error || error{
     Overflow,
     InvalidWireType,
@@ -25,6 +28,7 @@ pub const DecodeError = std.Io.Reader.Error || error{
 
 // ── Varint ────────────────────────────────────────────────────────────
 
+/// Encode a u64 as a variable-length integer
 pub fn encode_varint(w: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
     var v = value;
     while (v > 0x7F) {
@@ -34,6 +38,7 @@ pub fn encode_varint(w: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
     try w.writeByte(@truncate(v));
 }
 
+/// Return the encoded size in bytes of a varint value
 pub fn varint_size(value: u64) u4 {
     var v = value;
     var size: u4 = 1;
@@ -44,6 +49,7 @@ pub fn varint_size(value: u64) u4 {
     return size;
 }
 
+/// Decode a variable-length integer into a u64
 pub fn decode_varint(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!u64 {
     var result: u64 = 0;
     for (0..10) |i| {
@@ -57,43 +63,51 @@ pub fn decode_varint(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})
 
 // ── ZigZag ────────────────────────────────────────────────────────────
 
+/// ZigZag-encode a signed 32-bit integer for sint32 wire format
 pub fn zigzag_encode(value: i32) u32 {
     const v: u32 = @bitCast(value);
     const sign: u32 = @bitCast(value >> 31);
     return (v << 1) ^ sign;
 }
 
+/// ZigZag-decode a uint32 back to a signed 32-bit integer
 pub fn zigzag_decode(value: u32) i32 {
     return @bitCast((value >> 1) ^ (0 -% (value & 1)));
 }
 
+/// ZigZag-encode a signed 64-bit integer for sint64 wire format
 pub fn zigzag_encode_64(value: i64) u64 {
     const v: u64 = @bitCast(value);
     const sign: u64 = @bitCast(value >> 63);
     return (v << 1) ^ sign;
 }
 
+/// ZigZag-decode a uint64 back to a signed 64-bit integer
 pub fn zigzag_decode_64(value: u64) i64 {
     return @bitCast((value >> 1) ^ (0 -% (value & 1)));
 }
 
 // ── Fixed-width ───────────────────────────────────────────────────────
 
+/// Encode a u32 as 4 little-endian bytes (fixed32/sfixed32)
 pub fn encode_fixed32(w: *std.Io.Writer, value: u32) std.Io.Writer.Error!void {
     const bytes: [4]u8 = @bitCast(std.mem.nativeToLittle(u32, value));
     try w.writeAll(&bytes);
 }
 
+/// Decode 4 little-endian bytes into a u32
 pub fn decode_fixed32(r: *std.Io.Reader) std.Io.Reader.Error!u32 {
     const bytes = try r.takeArray(4);
     return std.mem.littleToNative(u32, @bitCast(bytes.*));
 }
 
+/// Encode a u64 as 8 little-endian bytes (fixed64/sfixed64)
 pub fn encode_fixed64(w: *std.Io.Writer, value: u64) std.Io.Writer.Error!void {
     const bytes: [8]u8 = @bitCast(std.mem.nativeToLittle(u64, value));
     try w.writeAll(&bytes);
 }
 
+/// Decode 8 little-endian bytes into a u64
 pub fn decode_fixed64(r: *std.Io.Reader) std.Io.Reader.Error!u64 {
     const bytes = try r.takeArray(8);
     return std.mem.littleToNative(u64, @bitCast(bytes.*));
@@ -101,28 +115,34 @@ pub fn decode_fixed64(r: *std.Io.Reader) std.Io.Reader.Error!u64 {
 
 // ── Float/Double ──────────────────────────────────────────────────────
 
+/// Encode an f32 as 4 little-endian bytes
 pub fn encode_float(w: *std.Io.Writer, value: f32) std.Io.Writer.Error!void {
     return encode_fixed32(w, @bitCast(value));
 }
 
+/// Decode 4 little-endian bytes into an f32
 pub fn decode_float(r: *std.Io.Reader) std.Io.Reader.Error!f32 {
     return @bitCast(try decode_fixed32(r));
 }
 
+/// Encode an f64 as 8 little-endian bytes
 pub fn encode_double(w: *std.Io.Writer, value: f64) std.Io.Writer.Error!void {
     return encode_fixed64(w, @bitCast(value));
 }
 
+/// Decode 8 little-endian bytes into an f64
 pub fn decode_double(r: *std.Io.Reader) std.Io.Reader.Error!f64 {
     return @bitCast(try decode_fixed64(r));
 }
 
 // ── Tag ───────────────────────────────────────────────────────────────
 
+/// Encode a field tag (field number + wire type) as a varint
 pub fn encode_tag(w: *std.Io.Writer, tag: Tag) std.Io.Writer.Error!void {
     return encode_varint(w, (@as(u64, tag.field_number) << 3) | @intFromEnum(tag.wire_type));
 }
 
+/// Decode a varint into a field tag
 pub fn decode_tag(r: *std.Io.Reader) DecodeError!Tag {
     const raw = try decode_varint(r);
     const wire_type_int: u3 = @intCast(raw & 0x07);
@@ -136,17 +156,20 @@ pub fn decode_tag(r: *std.Io.Reader) DecodeError!Tag {
     };
 }
 
+/// Return the encoded size in bytes of a field tag
 pub fn tag_size(field_number: u29) u4 {
     return varint_size(@as(u64, field_number) << 3);
 }
 
 // ── Length-delimited ──────────────────────────────────────────────────
 
+/// Encode a length-delimited byte slice (length prefix + data)
 pub fn encode_len(w: *std.Io.Writer, data: []const u8) std.Io.Writer.Error!void {
     try encode_varint(w, @intCast(data.len));
     try w.writeAll(data);
 }
 
+/// Decode a length-delimited byte slice, allocating the result
 pub fn decode_len(r: *std.Io.Reader, allocator: std.mem.Allocator) ![]u8 {
     const len = std.math.cast(usize, try decode_varint(r)) orelse return error.Overflow;
     const buf = try allocator.alloc(u8, len);
@@ -157,50 +180,62 @@ pub fn decode_len(r: *std.Io.Reader, allocator: std.mem.Allocator) ![]u8 {
 
 // ── Scalar type helpers ───────────────────────────────────────────────
 
+/// Encode an int32 as a varint (sign-extended to 64 bits)
 pub fn encode_int32(w: *std.Io.Writer, value: i32) std.Io.Writer.Error!void {
     return encode_varint(w, @bitCast(@as(i64, value)));
 }
 
+/// Encode an int64 as a varint
 pub fn encode_int64(w: *std.Io.Writer, value: i64) std.Io.Writer.Error!void {
     return encode_varint(w, @bitCast(value));
 }
 
+/// Encode a uint32 as a varint
 pub fn encode_uint32(w: *std.Io.Writer, value: u32) std.Io.Writer.Error!void {
     return encode_varint(w, value);
 }
 
+/// Encode a sint32 using ZigZag encoding
 pub fn encode_sint32(w: *std.Io.Writer, value: i32) std.Io.Writer.Error!void {
     return encode_varint(w, zigzag_encode(value));
 }
 
+/// Encode a sint64 using ZigZag encoding
 pub fn encode_sint64(w: *std.Io.Writer, value: i64) std.Io.Writer.Error!void {
     return encode_varint(w, zigzag_encode_64(value));
 }
 
+/// Encode a bool as a varint (0 or 1)
 pub fn encode_bool(w: *std.Io.Writer, value: bool) std.Io.Writer.Error!void {
     return encode_varint(w, @intFromBool(value));
 }
 
+/// Decode a varint into an i32
 pub fn decode_int32(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!i32 {
     return @bitCast(@as(u32, @truncate(try decode_varint(r))));
 }
 
+/// Decode a varint into a u32
 pub fn decode_uint32(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!u32 {
     return @truncate(try decode_varint(r));
 }
 
+/// Decode a varint into an i64
 pub fn decode_int64(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!i64 {
     return @bitCast(try decode_varint(r));
 }
 
+/// Decode a ZigZag-encoded varint into an i32
 pub fn decode_sint32(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!i32 {
     return zigzag_decode(@truncate(try decode_varint(r)));
 }
 
+/// Decode a ZigZag-encoded varint into an i64
 pub fn decode_sint64(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!i64 {
     return zigzag_decode_64(try decode_varint(r));
 }
 
+/// Decode a varint into a bool (nonzero = true)
 pub fn decode_bool(r: *std.Io.Reader) (std.Io.Reader.Error || error{Overflow})!bool {
     return try decode_varint(r) != 0;
 }

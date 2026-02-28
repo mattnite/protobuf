@@ -6,6 +6,7 @@ const types = @import("types.zig");
 
 /// Generate a complete service definition including descriptor, Server, and Client.
 pub fn emit_service(e: *Emitter, service: ast.Service, package: ?[]const u8) !void {
+    try e.print("/// Protocol Buffers service: {s}\n", .{service.name});
     try e.print("pub const {s} = struct", .{service.name});
     try e.open_brace();
 
@@ -63,6 +64,7 @@ fn emit_service_descriptor(e: *Emitter, service: ast.Service, package: ?[]const 
     var name_buf: [512]u8 = undefined;
     const qual_name = qualified_service_name(package, service.name, &name_buf);
 
+    try e.print("/// Service descriptor with method metadata for routing\n", .{});
     try e.print("pub const service_descriptor = rpc.ServiceDescriptor{{\n", .{});
     e.indent_level += 1;
     try e.print(".name = \"{s}\",\n", .{qual_name});
@@ -89,6 +91,7 @@ fn emit_service_descriptor(e: *Emitter, service: ast.Service, package: ?[]const 
 // ── Server ──────────────────────────────────────────────────────────
 
 fn emit_server(e: *Emitter, service: ast.Service) !void {
+    try e.print("/// Server-side handler interface for this service\n", .{});
     try e.print("pub const Server = struct", .{});
     try e.open_brace();
 
@@ -110,6 +113,7 @@ fn emit_server(e: *Emitter, service: ast.Service) !void {
 }
 
 fn emit_server_vtable(e: *Emitter, service: ast.Service) !void {
+    try e.print("/// VTable of handler function pointers for each RPC method\n", .{});
     try e.print("pub const VTable = struct", .{});
     try e.open_brace();
 
@@ -255,6 +259,7 @@ fn emit_gen_vtable_entry(e: *Emitter, method: ast.Method) !void {
 // ── Client ──────────────────────────────────────────────────────────
 
 fn emit_client(e: *Emitter, service: ast.Service, package: ?[]const u8) !void {
+    try e.print("/// Client stub for making RPC calls to this service\n", .{});
     try e.print("pub const Client = struct", .{});
     try e.open_brace();
 

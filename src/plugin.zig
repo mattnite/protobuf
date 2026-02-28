@@ -860,7 +860,7 @@ fn encode_response(allocator: std.mem.Allocator, err_msg: ?[]const u8, features:
 /// Feature flag: FEATURE_PROTO3_OPTIONAL = 1
 const FEATURE_PROTO3_OPTIONAL: u64 = 1;
 
-/// Run the protoc plugin: read CodeGeneratorRequest from stdin, write CodeGeneratorResponse to stdout.
+/// Read a CodeGeneratorRequest from stdin, generate Zig sources, and write the response to stdout
 pub fn run() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -885,8 +885,7 @@ pub fn run() !void {
     };
 }
 
-/// Core generation logic, separated for testability.
-/// Takes raw CodeGeneratorRequest bytes, returns raw CodeGeneratorResponse bytes.
+/// Generate Zig source files from a serialized CodeGeneratorRequest, returning the serialized response
 pub fn generate(allocator: std.mem.Allocator, request_bytes: []const u8) ![]const u8 {
     const request = try decode_request(allocator, request_bytes);
 

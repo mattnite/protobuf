@@ -3,6 +3,7 @@ const testing = std.testing;
 
 // ── Source Location ───────────────────────────────────────────────────
 
+/// Source file location for diagnostics
 pub const SourceLocation = struct {
     file: []const u8,
     line: u32,
@@ -11,6 +12,7 @@ pub const SourceLocation = struct {
 
 // ── Top-Level Types ───────────────────────────────────────────────────
 
+/// A complete parsed .proto file
 pub const File = struct {
     syntax: Syntax,
     package: ?[]const u8,
@@ -22,8 +24,10 @@ pub const File = struct {
     extensions: []Extend,
 };
 
+/// Protocol Buffers syntax version (proto2 or proto3)
 pub const Syntax = enum { proto2, proto3 };
 
+/// A proto import declaration
 pub const Import = struct {
     path: []const u8,
     kind: enum { default, public, weak },
@@ -32,6 +36,7 @@ pub const Import = struct {
 
 // ── Message ───────────────────────────────────────────────────────────
 
+/// A parsed message definition
 pub const Message = struct {
     name: []const u8,
     fields: []Field,
@@ -48,6 +53,7 @@ pub const Message = struct {
     location: SourceLocation,
 };
 
+/// A parsed field within a message
 pub const Field = struct {
     name: []const u8,
     number: i32,
@@ -57,6 +63,7 @@ pub const Field = struct {
     location: SourceLocation,
 };
 
+/// Field cardinality (required, optional, repeated, or implicit)
 pub const FieldLabel = enum {
     required,
     optional,
@@ -64,6 +71,7 @@ pub const FieldLabel = enum {
     implicit,
 };
 
+/// Reference to a field's type (scalar, named message, or enum)
 pub const TypeRef = union(enum) {
     /// Built-in scalar type.
     scalar: ScalarType,
@@ -73,6 +81,7 @@ pub const TypeRef = union(enum) {
     enum_ref: []const u8,
 };
 
+/// Built-in scalar types (int32, string, bytes, etc.)
 pub const ScalarType = enum {
     double,
     float,
@@ -108,6 +117,7 @@ pub const ScalarType = enum {
         .{ "bytes", .bytes },
     });
 
+    /// Look up a scalar type by its proto name, returning null if not found
     pub fn from_string(s: []const u8) ?ScalarType {
         return map.get(s);
     }
@@ -115,6 +125,7 @@ pub const ScalarType = enum {
 
 // ── Oneof ─────────────────────────────────────────────────────────────
 
+/// A parsed oneof group
 pub const Oneof = struct {
     name: []const u8,
     fields: []Field,
@@ -124,6 +135,7 @@ pub const Oneof = struct {
 
 // ── Map ───────────────────────────────────────────────────────────────
 
+/// A parsed map field definition
 pub const MapField = struct {
     name: []const u8,
     number: i32,
@@ -135,6 +147,7 @@ pub const MapField = struct {
 
 // ── Enum ──────────────────────────────────────────────────────────────
 
+/// A parsed enum definition
 pub const Enum = struct {
     name: []const u8,
     values: []EnumValue,
@@ -145,6 +158,7 @@ pub const Enum = struct {
     location: SourceLocation,
 };
 
+/// A single value within an enum
 pub const EnumValue = struct {
     name: []const u8,
     number: i32,
@@ -154,6 +168,7 @@ pub const EnumValue = struct {
 
 // ── Service ───────────────────────────────────────────────────────────
 
+/// A parsed service definition
 pub const Service = struct {
     name: []const u8,
     methods: []Method,
@@ -161,6 +176,7 @@ pub const Service = struct {
     location: SourceLocation,
 };
 
+/// A single RPC method within a service
 pub const Method = struct {
     name: []const u8,
     input_type: []const u8,
@@ -173,12 +189,14 @@ pub const Method = struct {
 
 // ── Options ───────────────────────────────────────────────────────────
 
+/// A proto option declaration
 pub const Option = struct {
     name: OptionName,
     value: Constant,
     location: SourceLocation,
 };
 
+/// The name part of a proto option
 pub const OptionName = struct {
     parts: []Part,
 
@@ -188,11 +206,13 @@ pub const OptionName = struct {
     };
 };
 
+/// An inline field option (e.g., [packed=true])
 pub const FieldOption = struct {
     name: OptionName,
     value: Constant,
 };
 
+/// A constant value in proto syntax
 pub const Constant = union(enum) {
     identifier: []const u8,
     integer: i64,
@@ -205,17 +225,20 @@ pub const Constant = union(enum) {
 
 // ── Reserved / Extensions ─────────────────────────────────────────────
 
+/// A reserved field number range
 pub const ReservedRange = struct {
     start: i32,
     end: i32,
 };
 
+/// An extension field number range
 pub const ExtensionRange = struct {
     start: i32,
     end: i32,
     options: []FieldOption,
 };
 
+/// An extend block declaration
 pub const Extend = struct {
     type_name: []const u8,
     fields: []Field,
@@ -223,6 +246,7 @@ pub const Extend = struct {
     location: SourceLocation,
 };
 
+/// A parsed group definition (proto2)
 pub const Group = struct {
     name: []const u8,
     number: i32,

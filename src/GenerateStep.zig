@@ -1,3 +1,4 @@
+//! Build step that generates Zig source files from .proto definitions
 const std = @import("std");
 const proto = @import("proto.zig");
 const codegen_mod = @import("codegen.zig");
@@ -12,6 +13,7 @@ well_known_path: std.Build.LazyPath,
 generated_directory: std.Build.GeneratedFile,
 protobuf_mod: *std.Build.Module,
 
+/// Configuration options for the protobuf code generation step
 pub const Options = struct {
     /// Directory containing .proto sources (e.g., b.path("proto/"))
     proto_sources: std.Build.LazyPath,
@@ -19,6 +21,7 @@ pub const Options = struct {
     import_paths: []const std.Build.LazyPath = &.{},
 };
 
+/// Create a GenerateStep that compiles .proto files into a Zig module
 pub fn create(b: *std.Build, proto_dep: *std.Build.Dependency, options: Options) *GenerateStep {
     const self = b.allocator.create(GenerateStep) catch @panic("OOM");
     self.* = .{
@@ -59,6 +62,7 @@ pub fn create(b: *std.Build, proto_dep: *std.Build.Dependency, options: Options)
     return self;
 }
 
+/// Return the generated Zig module for use as an import in downstream code
 pub fn getModule(self: *GenerateStep) *std.Build.Module {
     return self.protobuf_mod;
 }

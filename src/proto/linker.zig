@@ -6,29 +6,35 @@ const parser_mod = @import("parser.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
+/// Set of linked .proto files with resolved cross-file references
 pub const ResolvedFileSet = struct {
     files: []ResolvedFile,
 
+    /// A single resolved .proto file within the file set
     pub const ResolvedFile = struct {
         source: ast.File,
         type_registry: std.StringHashMap(TypeInfo),
     };
 
+    /// Resolved type information for cross-file references
     pub const TypeInfo = union(enum) {
         message: *const ast.Message,
         @"enum": *const ast.Enum,
     };
 };
 
+/// Error set for linking operations
 pub const LinkError = error{
     OutOfMemory,
     LinkFailed,
 };
 
+/// VTable interface for loading .proto file content by name
 pub const FileLoader = struct {
     ptr: *anyopaque,
     load_fn: *const fn (*anyopaque, []const u8, std.mem.Allocator) LinkError![]const u8,
 
+    /// Load the .proto file at the given path
     pub fn load(self: FileLoader, path: []const u8, allocator: std.mem.Allocator) LinkError![]const u8 {
         return self.load_fn(self.ptr, path, allocator);
     }
@@ -48,6 +54,7 @@ pub const FileLoader = struct {
 
 // ── Linker ────────────────────────────────────────────────────────────
 
+/// Linker that resolves cross-file type references
 pub const Linker = struct {
     allocator: std.mem.Allocator,
     diagnostics: *parser_mod.DiagnosticList,
@@ -58,6 +65,7 @@ pub const Linker = struct {
     loading_stack: std.ArrayList([]const u8),
     global_types: std.StringHashMap(ResolvedFileSet.TypeInfo),
 
+    /// Create a linker with the given file loader
     pub fn init(
         allocator: std.mem.Allocator,
         diagnostics: *parser_mod.DiagnosticList,
@@ -73,6 +81,7 @@ pub const Linker = struct {
         };
     }
 
+    /// Link a set of parsed .proto files, resolving all type references
     pub fn link(self: *Linker, files: []const ast.File) LinkError!ResolvedFileSet {
         // Phase 1: Load imports
         for (files) |file| {
@@ -233,6 +242,7 @@ pub const Linker = struct {
 
     // ── Name Resolution ───────────────────────────────────────────────
 
+    /// Resolve a type name within the given scope, walking up the scope chain
     pub fn resolve_type_name(self: *Linker, name: []const u8, scope: []const u8) ?[]const u8 {
         // Absolute reference: starts with dot
         if (name.len > 0 and name[0] == '.') {

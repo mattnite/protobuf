@@ -8,12 +8,14 @@ const Error = Writer.Error;
 // Text Format Write Helpers
 // ══════════════════════════════════════════════════════════════════════
 
+/// Write indentation (2 spaces per level) for text format output
 pub fn write_indent(writer: *Writer, indent_level: usize) Error!void {
     for (0..indent_level) |_| {
         try writer.writeAll("  ");
     }
 }
 
+/// Write a C-style quoted string with escape handling
 pub fn write_string(writer: *Writer, value: []const u8) Error!void {
     try writer.writeByte('"');
     for (value) |c| {
@@ -38,19 +40,23 @@ pub fn write_string(writer: *Writer, value: []const u8) Error!void {
     try writer.writeByte('"');
 }
 
+/// Write a byte slice as a C-style quoted string
 pub fn write_bytes(writer: *Writer, value: []const u8) Error!void {
     // Text format uses same quoted string syntax for bytes
     try write_string(writer, value);
 }
 
+/// Write a signed integer as a decimal number
 pub fn write_int(writer: *Writer, value: i64) Error!void {
     try writer.print("{d}", .{value});
 }
 
+/// Write an unsigned integer as a decimal number
 pub fn write_uint(writer: *Writer, value: u64) Error!void {
     try writer.print("{d}", .{value});
 }
 
+/// Write a float value, using bare nan/inf for special values
 pub fn write_float(writer: *Writer, value: anytype) Error!void {
     const T = @TypeOf(value);
     if (T != f32 and T != f64) @compileError("write_float expects f32 or f64");
@@ -67,10 +73,12 @@ pub fn write_float(writer: *Writer, value: anytype) Error!void {
     }
 }
 
+/// Write a boolean as `true` or `false`
 pub fn write_bool(writer: *Writer, value: bool) Error!void {
     try writer.writeAll(if (value) "true" else "false");
 }
 
+/// Write an enum value as its bare identifier name
 pub fn write_enum_name(writer: *Writer, name: []const u8) Error!void {
     try writer.writeAll(name);
 }
@@ -79,6 +87,7 @@ pub fn write_enum_name(writer: *Writer, name: []const u8) Error!void {
 // Text Format Scanner (Deserialization)
 // ══════════════════════════════════════════════════════════════════════
 
+/// Error set for text format parsing operations
 pub const TextError = error{
     UnexpectedToken,
     UnexpectedEndOfInput,
@@ -88,6 +97,7 @@ pub const TextError = error{
     OutOfMemory,
 };
 
+/// Tagged union of text format token types from the scanner
 pub const TextToken = union(enum) {
     identifier: []const u8,
     string_literal: []const u8,
@@ -98,6 +108,7 @@ pub const TextToken = union(enum) {
     close_brace,
 };
 
+/// Pull-based tokenizer for protobuf text format input
 pub const TextScanner = struct {
     source: []const u8,
     pos: usize,
@@ -105,6 +116,7 @@ pub const TextScanner = struct {
     peeked: ?TextToken,
     allocated_strings: std.ArrayListUnmanaged([]const u8),
 
+    /// Create a scanner over a text format byte slice
     pub fn init(allocator: std.mem.Allocator, source: []const u8) TextScanner {
         return .{
             .source = source,
@@ -115,6 +127,7 @@ pub const TextScanner = struct {
         };
     }
 
+    /// Free all scanner-allocated memory
     pub fn deinit(self: *TextScanner) void {
         for (self.allocated_strings.items) |s| {
             self.allocator.free(s);
@@ -122,6 +135,7 @@ pub const TextScanner = struct {
         self.allocated_strings.deinit(self.allocator);
     }
 
+    /// Consume and return the next token, or null at end of input
     pub fn next(self: *TextScanner) TextError!?TextToken {
         if (self.peeked) |tok| {
             self.peeked = null;
@@ -130,6 +144,7 @@ pub const TextScanner = struct {
         return self.next_inner();
     }
 
+    /// Return the next token without consuming it
     pub fn peek(self: *TextScanner) TextError!?TextToken {
         if (self.peeked) |tok| {
             return tok;
@@ -433,6 +448,7 @@ pub const TextScanner = struct {
 
 // ── Scanner Read Helpers ──────────────────────────────────────────────
 
+/// Read and return a text format string literal
 pub fn read_string(scanner: *TextScanner) TextError![]const u8 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
@@ -441,6 +457,7 @@ pub fn read_string(scanner: *TextScanner) TextError![]const u8 {
     }
 }
 
+/// Read a text format boolean identifier (true/false)
 pub fn read_bool(scanner: *TextScanner) TextError!bool {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
@@ -453,6 +470,7 @@ pub fn read_bool(scanner: *TextScanner) TextError!bool {
     }
 }
 
+/// Read a text format integer as an i32
 pub fn read_int32(scanner: *TextScanner) TextError!i32 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -463,6 +481,7 @@ pub fn read_int32(scanner: *TextScanner) TextError!i32 {
     return std.fmt.parseInt(i32, text, 10) catch return TextError.Overflow;
 }
 
+/// Read a text format integer as an i64
 pub fn read_int64(scanner: *TextScanner) TextError!i64 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -473,6 +492,7 @@ pub fn read_int64(scanner: *TextScanner) TextError!i64 {
     return std.fmt.parseInt(i64, text, 10) catch return TextError.Overflow;
 }
 
+/// Read a text format integer as a u32
 pub fn read_uint32(scanner: *TextScanner) TextError!u32 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -483,6 +503,7 @@ pub fn read_uint32(scanner: *TextScanner) TextError!u32 {
     return std.fmt.parseInt(u32, text, 10) catch return TextError.Overflow;
 }
 
+/// Read a text format integer as a u64
 pub fn read_uint64(scanner: *TextScanner) TextError!u64 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -493,6 +514,7 @@ pub fn read_uint64(scanner: *TextScanner) TextError!u64 {
     return std.fmt.parseInt(u64, text, 10) catch return TextError.Overflow;
 }
 
+/// Read a text format number or identifier (nan/inf) as an f32
 pub fn read_float32(scanner: *TextScanner) TextError!f32 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
@@ -507,6 +529,7 @@ pub fn read_float32(scanner: *TextScanner) TextError!f32 {
     }
 }
 
+/// Read a text format number or identifier (nan/inf) as an f64
 pub fn read_float64(scanner: *TextScanner) TextError!f64 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
@@ -521,6 +544,7 @@ pub fn read_float64(scanner: *TextScanner) TextError!f64 {
     }
 }
 
+/// Read a text format identifier as an enum name
 pub fn read_enum_name(scanner: *TextScanner) TextError![]const u8 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
@@ -563,6 +587,8 @@ pub fn skip_field(scanner: *TextScanner) TextError!void {
 // but "-inf" is actually an identifier-like token. We need a special read for
 // negative float identifiers. This is handled by checking for a leading minus
 // followed by an identifier.
+
+/// Read an f32 handling negative inf/nan identifiers
 pub fn read_float32_with_sign(scanner: *TextScanner) TextError!f32 {
     // Peek to see if we have a negative number token that might be "-inf"/"-nan"
     const tok = try scanner.peek() orelse return TextError.UnexpectedEndOfInput;
