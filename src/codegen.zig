@@ -1,11 +1,17 @@
+//! Code generation from .proto AST to Zig source files
 const std = @import("std");
 const testing = std.testing;
 const ast = @import("proto/ast.zig");
 
+/// Low-level code emitter with indentation tracking
 pub const emitter = @import("codegen/emitter.zig");
+/// Type mapping and helper utilities for code generation
 pub const types = @import("codegen/types.zig");
+/// Enum type code generation
 pub const enums = @import("codegen/enums.zig");
+/// Message struct code generation
 pub const messages = @import("codegen/messages.zig");
+/// RPC service stub code generation
 pub const services = @import("codegen/services.zig");
 
 const Emitter = emitter.Emitter;

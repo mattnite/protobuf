@@ -6,6 +6,7 @@ comptime {
     _ = &GenerateStep.getModule;
 }
 
+/// Build the protobuf library, protoc-gen-zig plugin, tests, and benchmarks
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});

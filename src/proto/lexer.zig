@@ -4,6 +4,7 @@ const ast = @import("ast.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
+/// Token type produced by the .proto lexer
 pub const TokenKind = enum {
     // Literals
     identifier,
@@ -32,12 +33,14 @@ pub const TokenKind = enum {
     eof,
 };
 
+/// A lexed token with kind, text, and source location
 pub const Token = struct {
     kind: TokenKind,
     text: []const u8,
     location: ast.SourceLocation,
 };
 
+/// Error set for lexing operations
 pub const LexError = error{
     InvalidCharacter,
     UnterminatedBlockComment,
@@ -48,6 +51,7 @@ pub const LexError = error{
 
 // ── Lexer ─────────────────────────────────────────────────────────────
 
+/// Tokenizer for .proto file source text
 pub const Lexer = struct {
     source: []const u8,
     file_name: []const u8,
@@ -56,6 +60,7 @@ pub const Lexer = struct {
     column: u32,
     peeked: ?Token,
 
+    /// Create a lexer over the given .proto source text
     pub fn init(source: []const u8, file_name: []const u8) Lexer {
         return .{
             .source = source,
@@ -67,6 +72,7 @@ pub const Lexer = struct {
         };
     }
 
+    /// Consume and return the next token
     pub fn next(self: *Lexer) LexError!Token {
         if (self.peeked) |tok| {
             self.peeked = null;
@@ -75,6 +81,7 @@ pub const Lexer = struct {
         return self.scan();
     }
 
+    /// Return the next token without consuming it
     pub fn peek(self: *Lexer) LexError!Token {
         if (self.peeked) |tok| return tok;
         const tok = try self.scan();
@@ -301,6 +308,7 @@ pub const Lexer = struct {
 
 // ── String Resolution ─────────────────────────────────────────────────
 
+/// Resolve escape sequences in a proto string literal
 pub fn resolve_string(raw: []const u8, allocator: std.mem.Allocator) ![]u8 {
     if (raw.len < 2) return error.InvalidEscape;
     const quote = raw[0];

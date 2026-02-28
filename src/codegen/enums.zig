@@ -4,6 +4,7 @@ const ast = @import("../proto/ast.zig");
 const Emitter = @import("emitter.zig").Emitter;
 
 pub fn emit_enum(e: *Emitter, en: ast.Enum, syntax: ast.Syntax, full_name: []const u8) !void {
+    try e.print("/// Protocol Buffers enum: {s}\n", .{en.name});
     try e.print("pub const {s} = enum(i32)", .{en.name});
     try e.open_brace();
 
@@ -40,6 +41,7 @@ pub fn emit_enum(e: *Emitter, en: ast.Enum, syntax: ast.Syntax, full_name: []con
 }
 
 fn emit_enum_descriptor(e: *Emitter, en: ast.Enum, full_name: []const u8) !void {
+    try e.print("/// Runtime type descriptor for this enum\n", .{});
     try e.print("pub const descriptor = protobuf.descriptor.EnumDescriptor{{\n", .{});
     e.indent_level += 1;
     try e.print(".name = \"{s}\",\n", .{en.name});

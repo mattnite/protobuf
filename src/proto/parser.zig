@@ -5,27 +5,33 @@ const lexer_mod = @import("lexer.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
+/// A parser diagnostic message with severity and location
 pub const Diagnostic = struct {
     location: ast.SourceLocation,
     severity: Severity,
     message: []const u8,
 
+    /// Diagnostic severity level
     pub const Severity = enum { err, warning };
 };
 
+/// Managed list of parser diagnostics
 pub const DiagnosticList = std.ArrayList(Diagnostic);
 
 // ── Parser ────────────────────────────────────────────────────────────
 
+/// Parser that produces an AST from .proto tokens
 pub const Parser = struct {
     lexer: lexer_mod.Lexer,
     allocator: std.mem.Allocator,
     diagnostics: *DiagnosticList,
 
+    /// Create a parser for the given source text
     pub fn init(lexer: lexer_mod.Lexer, allocator: std.mem.Allocator, diagnostics: *DiagnosticList) Parser {
         return .{ .lexer = lexer, .allocator = allocator, .diagnostics = diagnostics };
     }
 
+    /// Parse a complete .proto file into an AST
     pub fn parse_file(self: *Parser) !ast.File {
         const syntax = try self.parse_syntax_decl();
 

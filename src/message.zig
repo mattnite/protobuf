@@ -4,8 +4,18 @@ const encoding = @import("encoding.zig");
 
 // ── Types ─────────────────────────────────────────────────────────────
 
-pub const Error = error{ EndOfStream, Overflow, InvalidWireType, InvalidFieldNumber };
+/// Default recursion depth limit for nested message decoding
+pub const default_max_decode_depth: usize = 100;
 
+/// Errors that can occur during message-level encoding and decoding
+pub const Error = error{ EndOfStream, Overflow, InvalidWireType, InvalidFieldNumber, RecursionLimitExceeded, InvalidUtf8 };
+
+/// Validate that a byte slice contains valid UTF-8
+pub fn validate_utf8(data: []const u8) error{InvalidUtf8}!void {
+    if (!std.unicode.utf8ValidateSlice(data)) return error.InvalidUtf8;
+}
+
+/// Tagged union holding the value of a decoded field, keyed by wire type
 pub const FieldValue = union(encoding.WireType) {
     varint: u64,
     i64: u64,
@@ -15,6 +25,7 @@ pub const FieldValue = union(encoding.WireType) {
     i32: u32,
 };
 
+/// A decoded field: field number paired with its wire-type-tagged value
 pub const Field = struct {
     number: u29,
     value: FieldValue,
@@ -57,10 +68,12 @@ fn read_fixed_slice(comptime n: comptime_int, data: []const u8, pos: *usize) err
 
 // ── FieldIterator ─────────────────────────────────────────────────────
 
+/// Zero-copy iterator over protobuf-encoded fields in a byte slice
 pub const FieldIterator = struct {
     data: []const u8,
     pos: usize = 0,
 
+    /// Return the next field or null at end of message
     pub fn next(self: *FieldIterator) Error!?Field {
         if (self.pos >= self.data.len) return null;
 
@@ -84,12 +97,14 @@ pub const FieldIterator = struct {
     }
 };
 
+/// Create a FieldIterator over protobuf-encoded bytes
 pub fn iterate_fields(data: []const u8) FieldIterator {
     return .{ .data = data };
 }
 
 // ── Skip Functions ────────────────────────────────────────────────────
 
+/// Skip over a field value of the given wire type, advancing the position
 pub fn skip_field(data: []const u8, pos: *usize, wire_type: encoding.WireType) Error!void {
     switch (wire_type) {
         .varint => _ = try decode_varint_slice(data, pos),
@@ -105,7 +120,14 @@ pub fn skip_field(data: []const u8, pos: *usize, wire_type: encoding.WireType) E
     }
 }
 
+/// Skip over a group (sgroup...egroup), advancing past the matching egroup tag
 pub fn skip_group(data: []const u8, pos: *usize, field_number: u29) Error!void {
+    return skip_group_depth(data, pos, field_number, default_max_decode_depth);
+}
+
+/// Skip over a group with an explicit recursion depth limit
+pub fn skip_group_depth(data: []const u8, pos: *usize, field_number: u29, depth_remaining: usize) Error!void {
+    if (depth_remaining == 0) return error.RecursionLimitExceeded;
     while (pos.* < data.len) {
         const tag = try decode_tag_slice(data, pos);
         if (tag.wire_type == .egroup) {
@@ -113,7 +135,7 @@ pub fn skip_group(data: []const u8, pos: *usize, field_number: u29) Error!void {
             continue;
         }
         if (tag.wire_type == .sgroup) {
-            try skip_group(data, pos, tag.field_number);
+            try skip_group_depth(data, pos, tag.field_number, depth_remaining - 1);
             continue;
         }
         try skip_field(data, pos, tag.wire_type);
@@ -123,33 +145,40 @@ pub fn skip_group(data: []const u8, pos: *usize, field_number: u29) Error!void {
 
 // ── MessageWriter ─────────────────────────────────────────────────────
 
+/// Helper for writing tagged protobuf fields to a writer
 pub const MessageWriter = struct {
     writer: *std.Io.Writer,
 
+    /// Create a MessageWriter wrapping a std.Io.Writer
     pub fn init(writer: *std.Io.Writer) MessageWriter {
         return .{ .writer = writer };
     }
 
+    /// Write a varint-typed field (tag + varint value)
     pub fn write_varint_field(self: MessageWriter, field_number: u29, value: u64) std.Io.Writer.Error!void {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .varint });
         try encoding.encode_varint(self.writer, value);
     }
 
+    /// Write a fixed32-typed field (tag + 4 bytes)
     pub fn write_i32_field(self: MessageWriter, field_number: u29, value: u32) std.Io.Writer.Error!void {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .i32 });
         try encoding.encode_fixed32(self.writer, value);
     }
 
+    /// Write a fixed64-typed field (tag + 8 bytes)
     pub fn write_i64_field(self: MessageWriter, field_number: u29, value: u64) std.Io.Writer.Error!void {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .i64 });
         try encoding.encode_fixed64(self.writer, value);
     }
 
+    /// Write a length-delimited field (tag + length + data)
     pub fn write_len_field(self: MessageWriter, field_number: u29, data: []const u8) std.Io.Writer.Error!void {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .len });
         try encoding.encode_len(self.writer, data);
     }
 
+    /// Write a packed repeated field (tag + length + data)
     pub fn write_packed_field(self: MessageWriter, field_number: u29, data: []const u8) std.Io.Writer.Error!void {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .len });
         try encoding.encode_len(self.writer, data);
@@ -175,42 +204,51 @@ pub const MessageWriter = struct {
 
 // ── Packed Iterators ──────────────────────────────────────────────────
 
+/// Iterator over packed varint values in a length-delimited field
 pub const PackedVarintIterator = struct {
     data: []const u8,
     pos: usize = 0,
 
+    /// Create an iterator over packed varint data
     pub fn init(data: []const u8) PackedVarintIterator {
         return .{ .data = data };
     }
 
+    /// Return the next varint value or null at end of data
     pub fn next(self: *PackedVarintIterator) error{ EndOfStream, Overflow }!?u64 {
         if (self.pos >= self.data.len) return null;
         return try decode_varint_slice(self.data, &self.pos);
     }
 };
 
+/// Iterator over packed fixed32 values in a length-delimited field
 pub const PackedFixed32Iterator = struct {
     data: []const u8,
     pos: usize = 0,
 
+    /// Create an iterator over packed fixed32 data
     pub fn init(data: []const u8) PackedFixed32Iterator {
         return .{ .data = data };
     }
 
+    /// Return the next fixed32 value or null at end of data
     pub fn next(self: *PackedFixed32Iterator) error{EndOfStream}!?u32 {
         if (self.pos >= self.data.len) return null;
         return std.mem.littleToNative(u32, @bitCast(try read_fixed_slice(4, self.data, &self.pos)));
     }
 };
 
+/// Iterator over packed fixed64 values in a length-delimited field
 pub const PackedFixed64Iterator = struct {
     data: []const u8,
     pos: usize = 0,
 
+    /// Create an iterator over packed fixed64 data
     pub fn init(data: []const u8) PackedFixed64Iterator {
         return .{ .data = data };
     }
 
+    /// Return the next fixed64 value or null at end of data
     pub fn next(self: *PackedFixed64Iterator) error{EndOfStream}!?u64 {
         if (self.pos >= self.data.len) return null;
         return std.mem.littleToNative(u64, @bitCast(try read_fixed_slice(8, self.data, &self.pos)));
@@ -219,26 +257,32 @@ pub const PackedFixed64Iterator = struct {
 
 // ── Size Helpers ──────────────────────────────────────────────────────
 
+/// Return the total encoded size of a varint field (tag + value)
 pub fn varint_field_size(field_number: u29, value: u64) usize {
     return @as(usize, encoding.tag_size(field_number)) + @as(usize, encoding.varint_size(value));
 }
 
+/// Return the total encoded size of a fixed32 field (tag + 4 bytes)
 pub fn i32_field_size(field_number: u29) usize {
     return @as(usize, encoding.tag_size(field_number)) + 4;
 }
 
+/// Return the total encoded size of a fixed64 field (tag + 8 bytes)
 pub fn i64_field_size(field_number: u29) usize {
     return @as(usize, encoding.tag_size(field_number)) + 8;
 }
 
+/// Return the total encoded size of a length-delimited field
 pub fn len_field_size(field_number: u29, data_len: usize) usize {
     return @as(usize, encoding.tag_size(field_number)) + @as(usize, encoding.varint_size(@intCast(data_len))) + data_len;
 }
 
+/// Return the encoded size of a start-group tag
 pub fn sgroup_tag_size(field_number: u29) usize {
     return @as(usize, encoding.tag_size(field_number));
 }
 
+/// Return the encoded size of an end-group tag
 pub fn egroup_tag_size(field_number: u29) usize {
     return @as(usize, encoding.tag_size(field_number));
 }
@@ -873,6 +917,65 @@ test "integration: size helpers match MessageWriter output" {
 test "integration: empty message round-trip" {
     var iter = iterate_fields("");
     try testing.expectEqual(@as(?Field, null), try iter.next());
+}
+
+// ── validate_utf8 tests ──────────────────────────────────────────────
+
+test "validate_utf8: valid ASCII" {
+    try validate_utf8("hello world");
+}
+
+test "validate_utf8: valid multi-byte UTF-8" {
+    try validate_utf8("こんにちは");
+    try validate_utf8("🎉");
+    try validate_utf8("café");
+}
+
+test "validate_utf8: empty string" {
+    try validate_utf8("");
+}
+
+test "validate_utf8: invalid continuation byte" {
+    try testing.expectError(error.InvalidUtf8, validate_utf8(&[_]u8{0x80}));
+}
+
+test "validate_utf8: truncated multi-byte sequence" {
+    // Start of 2-byte sequence without continuation
+    try testing.expectError(error.InvalidUtf8, validate_utf8(&[_]u8{0xC0}));
+}
+
+test "validate_utf8: invalid byte 0xFF" {
+    try testing.expectError(error.InvalidUtf8, validate_utf8(&[_]u8{ 'a', 0xFF, 'b' }));
+}
+
+// ── skip_group_depth tests ──────────────────────────────────────────
+
+test "skip_group_depth: depth 0 returns RecursionLimitExceeded" {
+    const data = [_]u8{ 0x10, 0x96, 0x01, 0x0C };
+    var pos: usize = 0;
+    try testing.expectError(error.RecursionLimitExceeded, skip_group_depth(&data, &pos, 1, 0));
+}
+
+test "skip_group_depth: nested groups exceeding limit" {
+    // Build deeply nested groups: sgroup 1, sgroup 2, sgroup 3, egroup 3, egroup 2, egroup 1
+    // sgroup field 1: (1 << 3) | 3 = 0x0B
+    // sgroup field 2: (2 << 3) | 3 = 0x13
+    // sgroup field 3: (3 << 3) | 3 = 0x1B
+    // egroup field 3: (3 << 3) | 4 = 0x1C
+    // egroup field 2: (2 << 3) | 4 = 0x14
+    // egroup field 1: (1 << 3) | 4 = 0x0C
+    const data = [_]u8{ 0x13, 0x1B, 0x1C, 0x14, 0x0C };
+    // With depth_remaining = 1, the outer group (field 1) starts OK but nested sgroup field 2
+    // needs depth 0 which should fail
+    var pos: usize = 0;
+    try testing.expectError(error.RecursionLimitExceeded, skip_group_depth(&data, &pos, 1, 1));
+}
+
+test "skip_group_depth: sufficient depth succeeds" {
+    const data = [_]u8{ 0x13, 0x1B, 0x1C, 0x14, 0x0C };
+    var pos: usize = 0;
+    try skip_group_depth(&data, &pos, 1, 3);
+    try testing.expectEqual(@as(usize, 5), pos);
 }
 
 test "fuzz: FieldIterator handles arbitrary input" {

@@ -15,6 +15,7 @@ comptime {
 }
 
 pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_name: []const u8) std.mem.Allocator.Error!void {
+    try e.print("/// Protocol Buffers message: {s}\n", .{msg.name});
     try e.print("pub const {s} = struct", .{msg.name});
     try e.open_brace();
 
@@ -111,6 +112,7 @@ pub fn emit_message(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_name
 
 fn emit_descriptor(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_name: []const u8) std.mem.Allocator.Error!void {
     _ = syntax;
+    try e.print("/// Runtime type descriptor for reflection and dynamic message operations\n", .{});
     try e.print("pub const descriptor = protobuf.descriptor.MessageDescriptor{{\n", .{});
     e.indent_level += 1;
     try e.print(".name = \"{s}\",\n", .{msg.name});
@@ -273,6 +275,7 @@ fn emit_map_field_descriptor(e: *Emitter, map_field: ast.MapField) !void {
 }
 
 fn emit_group_descriptor(e: *Emitter, group: ast.Group, full_name: []const u8) !void {
+    try e.print("/// Runtime type descriptor for reflection and dynamic message operations\n", .{});
     try e.print("pub const descriptor = protobuf.descriptor.MessageDescriptor{{\n", .{});
     e.indent_level += 1;
     try e.print(".name = \"{s}\",\n", .{group.name});
@@ -412,6 +415,7 @@ fn emit_getter_method(e: *Emitter, field: ast.Field, def: ast.Constant) !void {
     var def_buf: [256]u8 = undefined;
     const def_lit = types.emit_default_literal(def, scalar_for_literal, &def_buf);
 
+    try e.print("/// Return the value of {s}, or its default if not set\n", .{field.name});
     try e.print("pub fn get_{f}(self: @This()) {s}", .{ escaped, return_type });
     try e.open_brace();
     try e.print("return self.{f} orelse {s};\n", .{ escaped, def_lit });
@@ -420,6 +424,7 @@ fn emit_getter_method(e: *Emitter, field: ast.Field, def: ast.Constant) !void {
 
 fn emit_group_struct(e: *Emitter, group: ast.Group, syntax: ast.Syntax, full_name: []const u8) !void {
     // Groups are like mini-messages: emit as nested struct
+    try e.print("/// Protocol Buffers group: {s}\n", .{group.name});
     try e.print("pub const {s} = struct", .{group.name});
     try e.open_brace();
 
@@ -519,6 +524,7 @@ fn group_field_name(group_name: []const u8, buf: []u8) []const u8 {
 }
 
 fn emit_group_encode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    try e.print("/// Serialize this group to protobuf binary wire format\n", .{});
     try e.print("pub fn encode(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
     try e.open_brace();
     try e.print("const mw = message.MessageWriter.init(writer);\n", .{});
@@ -530,6 +536,7 @@ fn emit_group_encode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !
 }
 
 fn emit_group_calc_size_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    try e.print("/// Calculate the serialized size in bytes without encoding\n", .{});
     try e.print("pub fn calc_size(self: @This()) usize", .{});
     try e.open_brace();
     try e.print("var size: usize = 0;\n", .{});
@@ -542,8 +549,19 @@ fn emit_group_calc_size_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax
 }
 
 fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !void {
+    // Public wrapper with default depth
+    try e.print("/// Deserialize this group from a field iterator. Caller must call deinit when done\n", .{});
     try e.print("pub fn decode_group(allocator: std.mem.Allocator, iter: *message.FieldIterator, group_field_number: u29) !@This()", .{});
     try e.open_brace();
+    try e.print("return @This().decode_group_inner(allocator, iter, group_field_number, message.default_max_decode_depth);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // Inner decode with depth tracking
+    try e.print("pub fn decode_group_inner(allocator: std.mem.Allocator, iter: *message.FieldIterator, group_field_number: u29, depth_remaining: usize) !@This()", .{});
+    try e.open_brace();
+    try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("while (try iter.next()) |field|", .{});
     try e.open_brace();
@@ -560,7 +578,7 @@ fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !
     // Unknown field handling (including nested sgroups)
     try e.print("else => switch (field.value)", .{});
     try e.open_brace();
-    try e.print(".sgroup => try message.skip_group(iter.data, &iter.pos, field.number),\n", .{});
+    try e.print(".sgroup => try message.skip_group_depth(iter.data, &iter.pos, field.number, depth_remaining - 1),\n", .{});
     try e.print("else => {{}},\n", .{});
     try e.close_brace_comma();
 
@@ -571,6 +589,7 @@ fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax) !
 }
 
 fn emit_group_deinit_method(e: *Emitter, group: ast.Group) !void {
+    try e.print("/// Free all allocator-owned memory\n", .{});
     try e.print("pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void", .{});
     try e.open_brace();
     for (group.fields) |field| {
@@ -581,6 +600,7 @@ fn emit_group_deinit_method(e: *Emitter, group: ast.Group) !void {
 }
 
 fn emit_group_to_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !void {
+    try e.print("/// Serialize this group to proto-JSON format\n", .{});
     try e.print("pub fn to_json(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
     try e.open_brace();
     try e.print("try json.write_object_start(writer);\n", .{});
@@ -596,6 +616,7 @@ fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !vo
     const json_mod = "json";
 
     // from_json entry point
+    try e.print("/// Deserialize this group from proto-JSON format bytes\n", .{});
     try e.print("pub fn from_json(allocator: std.mem.Allocator, json_bytes: []const u8) !@This()", .{});
     try e.open_brace();
     try e.print("var scanner = {s}.JsonScanner.init(allocator, json_bytes);\n", .{json_mod});
@@ -605,9 +626,18 @@ fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !vo
 
     try e.blank_line();
 
-    // from_json_scanner
+    // from_json_scanner public wrapper (use @This() to avoid ambiguity with parent struct)
     try e.print("pub fn from_json_scanner(allocator: std.mem.Allocator, scanner: *{s}.JsonScanner) !@This()", .{json_mod});
     try e.open_brace();
+    try e.print("return @This().from_json_scanner_inner(allocator, scanner, message.default_max_decode_depth);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_json_scanner_inner with depth tracking
+    try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *{s}.JsonScanner, depth_remaining: usize) !@This()", .{json_mod});
+    try e.open_brace();
+    try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (start_tok != .object_start) return error.UnexpectedToken;\n", .{});
@@ -680,6 +710,7 @@ fn emit_map_field(e: *Emitter, map_field: ast.MapField) !void {
 }
 
 fn emit_oneof_type(e: *Emitter, oneof: ast.Oneof, syntax: ast.Syntax) !void {
+    try e.print("/// Oneof union for mutually exclusive fields\n", .{});
     try e.print("pub const ", .{});
     try emit_oneof_type_name(e, oneof);
     try e.print_raw(" = union(enum)", .{});
@@ -727,6 +758,7 @@ fn emit_oneof_type_name(e: *Emitter, oneof: ast.Oneof) !void {
 // ── Encode Method ─────────────────────────────────────────────────────
 
 fn emit_encode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    try e.print("/// Serialize this message to protobuf binary wire format\n", .{});
     try e.print("pub fn encode(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
     try e.open_brace();
     try e.print("const mw = message.MessageWriter.init(writer);\n", .{});
@@ -1151,6 +1183,7 @@ fn emit_encode_group(e: *Emitter, grp: ast.Group) !void {
 // ── Calc Size Method ──────────────────────────────────────────────────
 
 fn emit_calc_size_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    try e.print("/// Calculate the serialized size in bytes without encoding\n", .{});
     try e.print("pub fn calc_size(self: @This()) usize", .{});
     try e.open_brace();
     try e.print("var size: usize = 0;\n", .{});
@@ -1437,8 +1470,19 @@ fn emit_size_group(e: *Emitter, grp: ast.Group) !void {
 // ── Decode Method ─────────────────────────────────────────────────────
 
 fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    // Public wrapper with default depth
+    try e.print("/// Deserialize from protobuf binary wire format bytes. Caller must call deinit when done\n", .{});
     try e.print("pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !@This()", .{});
     try e.open_brace();
+    try e.print("return @This().decode_inner(allocator, bytes, message.default_max_decode_depth);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // Inner decode with depth tracking
+    try e.print("pub fn decode_inner(allocator: std.mem.Allocator, bytes: []const u8, depth_remaining: usize) !@This()", .{});
+    try e.open_brace();
+    try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("var iter = message.iterate_fields(bytes);\n", .{});
     try e.print("while (try iter.next()) |field|", .{});
@@ -1453,13 +1497,13 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
 
     // Map fields
     for (msg.maps) |map_field| {
-        try emit_decode_map_case(e, map_field);
+        try emit_decode_map_case(e, map_field, syntax);
     }
 
     // Oneof fields
     for (msg.oneofs) |oneof| {
         for (oneof.fields) |field| {
-            try emit_decode_oneof_field_case(e, field, oneof);
+            try emit_decode_oneof_field_case(e, field, oneof, syntax);
         }
     }
 
@@ -1471,7 +1515,7 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
     // else => unknown fields — skip, including sgroup wire types
     try e.print("else => switch (field.value)", .{});
     try e.open_brace();
-    try e.print(".sgroup => try message.skip_group(bytes, &iter.pos, field.number),\n", .{});
+    try e.print(".sgroup => try message.skip_group_depth(bytes, &iter.pos, field.number, depth_remaining - 1),\n", .{});
     try e.print("else => {{}},\n", .{});
     try e.close_brace_comma();
 
@@ -1481,7 +1525,7 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
     try e.close_brace_nosemi(); // fn
 }
 
-fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
+fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax) !void {
     const escaped = types.escape_zig_keyword(field.name);
     const num = field.number;
 
@@ -1491,14 +1535,26 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
         .scalar => |s| {
             switch (field.label) {
                 .implicit, .required => {
-                    if (s == .string or s == .bytes) {
+                    if (s == .string and syntax == .proto3) {
+                        try e.open_brace();
+                        try e.print("try message.validate_utf8(field.value.len);\n", .{});
+                        try e.print("result.{f} = try allocator.dupe(u8, field.value.len);\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}},\n", .{});
+                    } else if (s == .string or s == .bytes) {
                         try e.print_raw(" result.{f} = try allocator.dupe(u8, {s}),\n", .{ escaped, types.scalar_decode_expr(s) });
                     } else {
                         try e.print_raw(" result.{f} = {s},\n", .{ escaped, types.scalar_decode_expr(s) });
                     }
                 },
                 .optional => {
-                    if (s == .string or s == .bytes) {
+                    if (s == .string and syntax == .proto3) {
+                        try e.open_brace();
+                        try e.print("try message.validate_utf8(field.value.len);\n", .{});
+                        try e.print("result.{f} = try allocator.dupe(u8, field.value.len);\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}},\n", .{});
+                    } else if (s == .string or s == .bytes) {
                         try e.print_raw(" result.{f} = try allocator.dupe(u8, {s}),\n", .{ escaped, types.scalar_decode_expr(s) });
                     } else {
                         try e.print_raw(" result.{f} = {s},\n", .{ escaped, types.scalar_decode_expr(s) });
@@ -1547,6 +1603,9 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                         try e.print("const old = result.{f};\n", .{escaped});
                         try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
                         try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                        if (s == .string and syntax == .proto3) {
+                            try e.print("try message.validate_utf8(field.value.len);\n", .{});
+                        }
                         try e.print("new[old.len] = try allocator.dupe(u8, field.value.len);\n", .{});
                         try e.print("if (old.len > 0) allocator.free(old);\n", .{});
                         try e.print("result.{f} = new;\n", .{escaped});
@@ -1559,10 +1618,10 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
         .named => {
             switch (field.label) {
                 .optional, .implicit => {
-                    try e.print_raw(" result.{f} = try @TypeOf(result.{f}.?).decode(allocator, field.value.len),\n", .{ escaped, escaped });
+                    try e.print_raw(" result.{f} = try @TypeOf(result.{f}.?).decode_inner(allocator, field.value.len, depth_remaining - 1),\n", .{ escaped, escaped });
                 },
                 .required => {
-                    try e.print_raw(" result.{f} = try @TypeOf(result.{f}).decode(allocator, field.value.len),\n", .{ escaped, escaped });
+                    try e.print_raw(" result.{f} = try @TypeOf(result.{f}).decode_inner(allocator, field.value.len, depth_remaining - 1),\n", .{ escaped, escaped });
                 },
                 .repeated => {
                     try e.print_raw("", .{});
@@ -1570,7 +1629,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
                     try e.print("const old = result.{f};\n", .{escaped});
                     try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
                     try e.print("@memcpy(new[0..old.len], old);\n", .{});
-                    try e.print("new[old.len] = try @TypeOf(old[0]).decode(allocator, field.value.len);\n", .{});
+                    try e.print("new[old.len] = try @TypeOf(old[0]).decode_inner(allocator, field.value.len, depth_remaining - 1);\n", .{});
                     try e.print("if (old.len > 0) allocator.free(old);\n", .{});
                     try e.print("result.{f} = new;\n", .{escaped});
                     e.indent_level -= 1;
@@ -1629,7 +1688,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, _: ast.Syntax) !void {
     }
 }
 
-fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField) !void {
+fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField, syntax: ast.Syntax) !void {
     const escaped = types.escape_zig_keyword(map_field.name);
     const num = map_field.number;
 
@@ -1645,8 +1704,8 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField) !void {
     try e.open_brace();
     try e.print("switch (entry.number)", .{});
     try e.open_brace();
-    try emit_decode_map_key_case(e, map_field.key_type);
-    try emit_decode_map_value_case(e, map_field.value_type);
+    try emit_decode_map_key_case(e, map_field.key_type, syntax);
+    try emit_decode_map_value_case(e, map_field.value_type, syntax);
     try e.print("else => {{}},\n", .{});
     try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
@@ -1685,9 +1744,18 @@ fn emit_decode_map_value_decl(e: *Emitter, value_type: ast.TypeRef) !void {
     }
 }
 
-fn emit_decode_map_key_case(e: *Emitter, key_type: ast.ScalarType) !void {
+fn emit_decode_map_key_case(e: *Emitter, key_type: ast.ScalarType, syntax: ast.Syntax) !void {
     if (key_type == .string) {
-        try e.print("1 => entry_key = try allocator.dupe(u8, entry.value.len),\n", .{});
+        if (syntax == .proto3) {
+            try e.print("1 =>", .{});
+            try e.open_brace();
+            try e.print("try message.validate_utf8(entry.value.len);\n", .{});
+            try e.print("entry_key = try allocator.dupe(u8, entry.value.len);\n", .{});
+            e.indent_level -= 1;
+            try e.print("}},\n", .{});
+        } else {
+            try e.print("1 => entry_key = try allocator.dupe(u8, entry.value.len),\n", .{});
+        }
     } else {
         const decode_expr = types.scalar_decode_expr(key_type);
         // Replace "field." with "entry." in decode expressions
@@ -1696,17 +1764,24 @@ fn emit_decode_map_key_case(e: *Emitter, key_type: ast.ScalarType) !void {
     }
 }
 
-fn emit_decode_map_value_case(e: *Emitter, value_type: ast.TypeRef) !void {
+fn emit_decode_map_value_case(e: *Emitter, value_type: ast.TypeRef, syntax: ast.Syntax) !void {
     switch (value_type) {
         .scalar => |s| {
-            if (s == .string or s == .bytes) {
+            if (s == .string and syntax == .proto3) {
+                try e.print("2 =>", .{});
+                try e.open_brace();
+                try e.print("try message.validate_utf8(entry.value.len);\n", .{});
+                try e.print("entry_val = try allocator.dupe(u8, entry.value.len);\n", .{});
+                e.indent_level -= 1;
+                try e.print("}},\n", .{});
+            } else if (s == .string or s == .bytes) {
                 try e.print("2 => entry_val = try allocator.dupe(u8, entry.value.len),\n", .{});
             } else {
                 try e.print("2 => entry_val = {s},\n", .{scalar_decode_entry_expr(s)});
             }
         },
         .named => |name| {
-            try e.print("2 => entry_val = try {s}.decode(allocator, entry.value.len),\n", .{name});
+            try e.print("2 => entry_val = try {s}.decode_inner(allocator, entry.value.len, depth_remaining - 1),\n", .{name});
         },
         .enum_ref => {
             try e.print("2 => entry_val = @enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(entry.value.varint))))),\n", .{});
@@ -1733,7 +1808,7 @@ fn scalar_decode_entry_expr(s: ast.ScalarType) []const u8 {
     };
 }
 
-fn emit_decode_oneof_field_case(e: *Emitter, field: ast.Field, oneof: ast.Oneof) !void {
+fn emit_decode_oneof_field_case(e: *Emitter, field: ast.Field, oneof: ast.Oneof, syntax: ast.Syntax) !void {
     const field_escaped = types.escape_zig_keyword(field.name);
     const oneof_escaped = types.escape_zig_keyword(oneof.name);
     const num = field.number;
@@ -1741,14 +1816,21 @@ fn emit_decode_oneof_field_case(e: *Emitter, field: ast.Field, oneof: ast.Oneof)
     try e.print("{d} => ", .{num});
     switch (field.type_name) {
         .scalar => |s| {
-            if (s == .string or s == .bytes) {
+            if (s == .string and syntax == .proto3) {
+                try e.print_raw("", .{});
+                try e.open_brace();
+                try e.print("try message.validate_utf8(field.value.len);\n", .{});
+                try e.print("result.{f} = .{{ .{f} = try allocator.dupe(u8, field.value.len) }};\n", .{ oneof_escaped, field_escaped });
+                e.indent_level -= 1;
+                try e.print("}},\n", .{});
+            } else if (s == .string or s == .bytes) {
                 try e.print_raw("result.{f} = .{{ .{f} = try allocator.dupe(u8, field.value.len) }},\n", .{ oneof_escaped, field_escaped });
             } else {
                 try e.print_raw("result.{f} = .{{ .{f} = {s} }},\n", .{ oneof_escaped, field_escaped, types.scalar_decode_expr(s) });
             }
         },
         .named => |name| {
-            try e.print_raw("result.{f} = .{{ .{f} = try {s}.decode(allocator, field.value.len) }},\n", .{ oneof_escaped, field_escaped, name });
+            try e.print_raw("result.{f} = .{{ .{f} = try {s}.decode_inner(allocator, field.value.len, depth_remaining - 1) }},\n", .{ oneof_escaped, field_escaped, name });
         },
         .enum_ref => {
             try e.print_raw("result.{f} = .{{ .{f} = @enumFromInt(@as(i32, @bitCast(@as(u32, @truncate(field.value.varint))))) }},\n", .{ oneof_escaped, field_escaped });
@@ -1765,10 +1847,10 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
     try e.print("{d} => ", .{num});
     switch (grp.label) {
         .optional, .implicit => {
-            try e.print_raw("result.{f} = try {s}.decode_group(allocator, &iter, {d}),\n", .{ escaped, grp.name, num });
+            try e.print_raw("result.{f} = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1),\n", .{ escaped, grp.name, num });
         },
         .required => {
-            try e.print_raw("result.{f} = try {s}.decode_group(allocator, &iter, {d}),\n", .{ escaped, grp.name, num });
+            try e.print_raw("result.{f} = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1),\n", .{ escaped, grp.name, num });
         },
         .repeated => {
             try e.print_raw("", .{});
@@ -1776,7 +1858,7 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
             try e.print("const old = result.{f};\n", .{escaped});
             try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{grp.name});
             try e.print("@memcpy(new[0..old.len], old);\n", .{});
-            try e.print("new[old.len] = try {s}.decode_group(allocator, &iter, {d});\n", .{ grp.name, num });
+            try e.print("new[old.len] = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1);\n", .{ grp.name, num });
             try e.print("if (old.len > 0) allocator.free(old);\n", .{});
             try e.print("result.{f} = new;\n", .{escaped});
             e.indent_level -= 1;
@@ -1788,6 +1870,7 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
 // ── Deinit Method ─────────────────────────────────────────────────────
 
 fn emit_deinit_method(e: *Emitter, msg: ast.Message, _: ast.Syntax) !void {
+    try e.print("/// Free all allocator-owned memory (repeated fields, strings, bytes, nested messages)\n", .{});
     try e.print("pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void", .{});
     try e.open_brace();
 
@@ -1951,6 +2034,7 @@ fn emit_deinit_group(e: *Emitter, grp: ast.Group) !void {
 // ── JSON Serialization Method ──────────────────────────────────────────
 
 fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    try e.print("/// Serialize this message to proto-JSON format\n", .{});
     try e.print("pub fn to_json(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
     try e.open_brace();
     try e.print("try json.write_object_start(writer);\n", .{});
@@ -2385,6 +2469,7 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
     const json_mod = "json";
 
     // from_json entry point
+    try e.print("/// Deserialize from proto-JSON format bytes. Caller must call deinit when done\n", .{});
     try e.print("pub fn from_json(allocator: std.mem.Allocator, json_bytes: []const u8) !@This()", .{});
     try e.open_brace();
     try e.print("var scanner = {s}.JsonScanner.init(allocator, json_bytes);\n", .{json_mod});
@@ -2394,9 +2479,18 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
 
     try e.blank_line();
 
-    // from_json_scanner
+    // from_json_scanner public wrapper
     try e.print("pub fn from_json_scanner(allocator: std.mem.Allocator, scanner: *{s}.JsonScanner) !@This()", .{json_mod});
     try e.open_brace();
+    try e.print("return @This().from_json_scanner_inner(allocator, scanner, message.default_max_decode_depth);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_json_scanner_inner with depth tracking
+    try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *{s}.JsonScanner, depth_remaining: usize) !@This()", .{json_mod});
+    try e.open_brace();
+    try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
 
     // Expect object_start
@@ -2509,7 +2603,7 @@ fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, fir
         .named => |name| {
             switch (field.label) {
                 .implicit, .optional, .required => {
-                    try e.print("result.{f} = try {s}.from_json_scanner(allocator, scanner);\n", .{ escaped, name });
+                    try e.print("result.{f} = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, name });
                 },
                 .repeated => {
                     try emit_from_json_repeated_named(e, escaped, name);
@@ -2566,7 +2660,7 @@ fn emit_from_json_repeated_named(e: *Emitter, escaped: types.EscapedName, name: 
     try e.print("if (p == .array_end) {{ _ = try scanner.next(); break; }}\n", .{});
     e.indent_level -= 1;
     try e.print("}} else break;\n", .{});
-    try e.print("try list.append(allocator, try {s}.from_json_scanner(allocator, scanner));\n", .{name});
+    try e.print("try list.append(allocator, try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1));\n", .{name});
     try e.close_brace_nosemi();
     try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
 }
@@ -2647,7 +2741,7 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
             }
         },
         .named => |name| {
-            try e.print("const map_val = try {s}.from_json_scanner(allocator, scanner);\n", .{name});
+            try e.print("const map_val = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
         },
         .enum_ref => {
             try e.print("const map_val = @enumFromInt(try {s}.read_enum_int(scanner));\n", .{json_mod});
@@ -2683,7 +2777,7 @@ fn emit_from_json_group_branch(e: *Emitter, grp: ast.Group, first_branch: *bool)
 
     switch (grp.label) {
         .optional, .implicit, .required => {
-            try e.print("result.{f} = try {s}.from_json_scanner(allocator, scanner);\n", .{ escaped, grp.name });
+            try e.print("result.{f} = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, grp.name });
         },
         .repeated => {
             try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
@@ -2696,7 +2790,7 @@ fn emit_from_json_group_branch(e: *Emitter, grp: ast.Group, first_branch: *bool)
             try e.print("if (p == .array_end) {{ _ = try scanner.next(); break; }}\n", .{});
             e.indent_level -= 1;
             try e.print("}} else break;\n", .{});
-            try e.print("try list.append(allocator, try {s}.from_json_scanner(allocator, scanner));\n", .{grp.name});
+            try e.print("try list.append(allocator, try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1));\n", .{grp.name});
             try e.close_brace_nosemi();
             try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
         },
@@ -2738,7 +2832,7 @@ fn emit_from_json_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.O
             }
         },
         .named => |name| {
-            try e.print("result.{f} = .{{ .{f} = try {s}.from_json_scanner(allocator, scanner) }};\n", .{ oneof_escaped, field_escaped, name });
+            try e.print("result.{f} = .{{ .{f} = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1) }};\n", .{ oneof_escaped, field_escaped, name });
         },
         .enum_ref => {
             try e.print("result.{f} = .{{ .{f} = @enumFromInt(try {s}.read_enum_int(scanner)) }};\n", .{ oneof_escaped, field_escaped, json_mod });
@@ -2752,6 +2846,7 @@ fn emit_from_json_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.O
 // ── Text Format Serialization Method ─────────────────────────────────
 
 fn emit_to_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !void {
+    try e.print("/// Serialize this message to protobuf text format\n", .{});
     try e.print("pub fn to_text(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
     try e.open_brace();
     try e.print("return self.to_text_indent(writer, 0);\n", .{});
@@ -3170,6 +3265,7 @@ fn emit_text_group(e: *Emitter, grp: ast.Group) !void {
 }
 
 fn emit_group_to_text_method(e: *Emitter, group: ast.Group) !void {
+    try e.print("/// Serialize this group to protobuf text format\n", .{});
     try e.print("pub fn to_text(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void", .{});
     try e.open_brace();
     try e.print("return self.to_text_indent(writer, 0);\n", .{});
@@ -3191,6 +3287,7 @@ fn emit_from_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
     _ = syntax;
 
     // from_text entry point
+    try e.print("/// Deserialize from protobuf text format. Caller must call deinit when done\n", .{});
     try e.print("pub fn from_text(allocator: std.mem.Allocator, text: []const u8) !@This()", .{});
     try e.open_brace();
     try e.print("var scanner = text_format.TextScanner.init(allocator, text);\n", .{});
@@ -3200,9 +3297,18 @@ fn emit_from_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax) !voi
 
     try e.blank_line();
 
-    // from_text_scanner
+    // from_text_scanner public wrapper
     try e.print("pub fn from_text_scanner(allocator: std.mem.Allocator, scanner: *text_format.TextScanner) !@This()", .{});
     try e.open_brace();
+    try e.print("return @This().from_text_scanner_inner(allocator, scanner, message.default_max_decode_depth);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_text_scanner_inner with depth tracking
+    try e.print("pub fn from_text_scanner_inner(allocator: std.mem.Allocator, scanner: *text_format.TextScanner, depth_remaining: usize) !@This()", .{});
+    try e.open_brace();
+    try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
 
     // Loop over tokens
@@ -3287,7 +3393,7 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                     // Text format allows optional colon before message blocks
                     try emit_text_consume_optional_colon(e);
                     try e.print("try scanner.expect_open_brace();\n", .{});
-                    try e.print("result.{f} = try {s}.from_text_scanner(allocator, scanner);\n", .{ escaped, name });
+                    try e.print("result.{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, name });
                     try e.print("try scanner.expect_close_brace();\n", .{});
                 },
                 .repeated => {
@@ -3346,7 +3452,7 @@ fn emit_from_text_repeated_named(e: *Emitter, escaped: types.EscapedName, name: 
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
-    try e.print("try list.append(allocator, try {s}.from_text_scanner(allocator, scanner));\n", .{name});
+    try e.print("try list.append(allocator, try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1));\n", .{name});
     try e.print("try scanner.expect_close_brace();\n", .{});
     try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
     e.indent_level -= 1;
@@ -3443,7 +3549,7 @@ fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
         .named => |name| {
             try emit_text_consume_optional_colon_static(e);
             try e.print("try scanner.expect_open_brace();\n", .{});
-            try e.print("map_val = try {s}.from_text_scanner(allocator, scanner);\n", .{name});
+            try e.print("map_val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
             try e.print("try scanner.expect_close_brace();\n", .{});
         },
         .enum_ref => {
@@ -3503,7 +3609,7 @@ fn emit_from_text_group_branch(e: *Emitter, grp: ast.Group, first_branch: *bool)
         .optional, .implicit, .required => {
             try emit_text_consume_optional_colon_static(e);
             try e.print("try scanner.expect_open_brace();\n", .{});
-            try e.print("result.{f} = try {s}.from_text_scanner(allocator, scanner);\n", .{ escaped, grp.name });
+            try e.print("result.{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, grp.name });
             try e.print("try scanner.expect_close_brace();\n", .{});
         },
         .repeated => {
@@ -3514,7 +3620,7 @@ fn emit_from_text_group_branch(e: *Emitter, grp: ast.Group, first_branch: *bool)
             try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{grp.name});
             try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
             try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
-            try e.print("try list.append(allocator, try {s}.from_text_scanner(allocator, scanner));\n", .{grp.name});
+            try e.print("try list.append(allocator, try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1));\n", .{grp.name});
             try e.print("try scanner.expect_close_brace();\n", .{});
             try e.print("result.{f} = try list.toOwnedSlice(allocator);\n", .{escaped});
             e.indent_level -= 1;
@@ -3552,7 +3658,7 @@ fn emit_from_text_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.O
         .named => |name| {
             try emit_text_consume_optional_colon_static(e);
             try e.print("try scanner.expect_open_brace();\n", .{});
-            try e.print("result.{f} = .{{ .{f} = try {s}.from_text_scanner(allocator, scanner) }};\n", .{ oneof_escaped, field_escaped, name });
+            try e.print("result.{f} = .{{ .{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1) }};\n", .{ oneof_escaped, field_escaped, name });
             try e.print("try scanner.expect_close_brace();\n", .{});
         },
         .enum_ref => {
@@ -3568,6 +3674,7 @@ fn emit_from_text_oneof_field_branch(e: *Emitter, field: ast.Field, oneof: ast.O
 
 fn emit_group_from_text_method(e: *Emitter, group: ast.Group) !void {
     // from_text entry point
+    try e.print("/// Deserialize this group from protobuf text format\n", .{});
     try e.print("pub fn from_text(allocator: std.mem.Allocator, text: []const u8) !@This()", .{});
     try e.open_brace();
     try e.print("var scanner = text_format.TextScanner.init(allocator, text);\n", .{});
@@ -3577,9 +3684,18 @@ fn emit_group_from_text_method(e: *Emitter, group: ast.Group) !void {
 
     try e.blank_line();
 
-    // from_text_scanner
+    // from_text_scanner public wrapper
     try e.print("pub fn from_text_scanner(allocator: std.mem.Allocator, scanner: *text_format.TextScanner) !@This()", .{});
     try e.open_brace();
+    try e.print("return @This().from_text_scanner_inner(allocator, scanner, message.default_max_decode_depth);\n", .{});
+    try e.close_brace_nosemi();
+
+    try e.blank_line();
+
+    // from_text_scanner_inner with depth tracking
+    try e.print("pub fn from_text_scanner_inner(allocator: std.mem.Allocator, scanner: *text_format.TextScanner, depth_remaining: usize) !@This()", .{});
+    try e.open_brace();
+    try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("while (try scanner.peek()) |tok|", .{});
     try e.open_brace();
@@ -3950,10 +4066,15 @@ test "emit_message: decode method" {
     try emit_message(&e, msg, .proto3, "Test");
     const output = e.get_output();
     try expect_output_contains(output, "pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !@This() {");
+    try expect_output_contains(output, "return @This().decode_inner(allocator, bytes, message.default_max_decode_depth);");
+    try expect_output_contains(output, "pub fn decode_inner(allocator: std.mem.Allocator, bytes: []const u8, depth_remaining: usize) !@This() {");
+    try expect_output_contains(output, "if (depth_remaining == 0) return error.RecursionLimitExceeded;");
     try expect_output_contains(output, "var result: @This() = .{};");
     try expect_output_contains(output, "var iter = message.iterate_fields(bytes);");
     try expect_output_contains(output, "switch (field.number) {");
-    try expect_output_contains(output, "1 => result.name = try allocator.dupe(u8, field.value.len),");
+    // Proto3 string field generates UTF-8 validation
+    try expect_output_contains(output, "try message.validate_utf8(field.value.len);");
+    try expect_output_contains(output, "result.name = try allocator.dupe(u8, field.value.len);");
 }
 
 test "emit_message: deinit method" {
@@ -4000,8 +4121,9 @@ test "emit_message: oneof encode/decode/deinit" {
     // Encode: switch on oneof variants
     try expect_output_contains(output, "if (self.payload) |oneof_val| switch (oneof_val)");
     try expect_output_contains(output, ".text => |v| try mw.write_len_field(1, v),");
-    // Decode: oneof field assignments
-    try expect_output_contains(output, "1 => result.payload = .{ .text = try allocator.dupe(u8, field.value.len) },");
+    // Decode: oneof field assignments (proto3 string gets UTF-8 validation)
+    try expect_output_contains(output, "try message.validate_utf8(field.value.len);");
+    try expect_output_contains(output, "result.payload = .{ .text = try allocator.dupe(u8, field.value.len) };");
     // Deinit: switch
     try expect_output_contains(output, "if (self.payload) |*oneof_val| switch (oneof_val.*)");
     try expect_output_contains(output, ".text => |v| allocator.free(v),");

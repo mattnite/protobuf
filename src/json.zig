@@ -4,18 +4,22 @@ const testing = std.testing;
 const Writer = std.Io.Writer;
 const Error = Writer.Error;
 
+/// Write a JSON object opening brace
 pub fn write_object_start(writer: *Writer) Error!void {
     try writer.writeByte('{');
 }
 
+/// Write a JSON object closing brace
 pub fn write_object_end(writer: *Writer) Error!void {
     try writer.writeByte('}');
 }
 
+/// Write a JSON array opening bracket
 pub fn write_array_start(writer: *Writer) Error!void {
     try writer.writeByte('[');
 }
 
+/// Write a JSON array closing bracket
 pub fn write_array_end(writer: *Writer) Error!void {
     try writer.writeByte(']');
 }
@@ -26,12 +30,14 @@ pub fn write_field_sep(writer: *Writer, first: bool) Error!bool {
     return false;
 }
 
+/// Write a JSON field name with quotes and colon
 pub fn write_field_name(writer: *Writer, name: []const u8) Error!void {
     try writer.writeByte('"');
     try writer.writeAll(name);
     try writer.writeAll("\":");
 }
 
+/// Write a JSON string with escape handling
 pub fn write_string(writer: *Writer, value: []const u8) Error!void {
     try writer.writeByte('"');
     for (value) |c| {
@@ -50,10 +56,12 @@ pub fn write_string(writer: *Writer, value: []const u8) Error!void {
     try writer.writeByte('"');
 }
 
+/// Write a signed integer as a JSON number
 pub fn write_int(writer: *Writer, value: i64) Error!void {
     try writer.print("{d}", .{value});
 }
 
+/// Write an unsigned integer as a JSON number
 pub fn write_uint(writer: *Writer, value: u64) Error!void {
     try writer.print("{d}", .{value});
 }
@@ -68,6 +76,7 @@ pub fn write_uint_string(writer: *Writer, value: u64) Error!void {
     try writer.print("\"{d}\"", .{value});
 }
 
+/// Write a float as a JSON number, or a quoted string for NaN/Infinity
 pub fn write_float(writer: *Writer, value: anytype) Error!void {
     const T = @TypeOf(value);
     if (T != f32 and T != f64) @compileError("write_float expects f32 or f64");
@@ -84,16 +93,19 @@ pub fn write_float(writer: *Writer, value: anytype) Error!void {
     }
 }
 
+/// Write a JSON boolean literal
 pub fn write_bool(writer: *Writer, value: bool) Error!void {
     try writer.writeAll(if (value) "true" else "false");
 }
 
+/// Write a byte slice as a base64-encoded JSON string
 pub fn write_bytes(writer: *Writer, value: []const u8) Error!void {
     try writer.writeByte('"');
     try std.base64.standard.Encoder.encodeWriter(writer, value);
     try writer.writeByte('"');
 }
 
+/// Write the JSON null literal
 pub fn write_null(writer: *Writer) Error!void {
     try writer.writeAll("null");
 }
@@ -109,6 +121,7 @@ pub fn write_enum_name(writer: *Writer, name: []const u8) Error!void {
 // JSON Scanner (Decoding)
 // ══════════════════════════════════════════════════════════════════════
 
+/// Error set for JSON parsing operations
 pub const JsonError = error{
     UnexpectedToken,
     UnexpectedEndOfInput,
@@ -119,6 +132,7 @@ pub const JsonError = error{
     OutOfMemory,
 };
 
+/// Tagged union of JSON token types from the scanner
 pub const JsonToken = union(enum) {
     object_start,
     object_end,
@@ -131,12 +145,14 @@ pub const JsonToken = union(enum) {
     null_value,
 };
 
+/// Pull-based tokenizer for JSON input
 pub const JsonScanner = struct {
     inner: std.json.Scanner,
     allocator: std.mem.Allocator,
     peeked: ?JsonToken,
     allocated_strings: std.ArrayListUnmanaged([]const u8),
 
+    /// Create a scanner over a JSON byte slice
     pub fn init(allocator: std.mem.Allocator, source: []const u8) JsonScanner {
         return .{
             .inner = std.json.Scanner.initCompleteInput(allocator, source),
@@ -146,6 +162,7 @@ pub const JsonScanner = struct {
         };
     }
 
+    /// Free all scanner-allocated memory
     pub fn deinit(self: *JsonScanner) void {
         for (self.allocated_strings.items) |s| {
             self.allocator.free(s);
@@ -154,6 +171,7 @@ pub const JsonScanner = struct {
         self.inner.deinit();
     }
 
+    /// Consume and return the next token, or null at end of input
     pub fn next(self: *JsonScanner) JsonError!?JsonToken {
         if (self.peeked) |tok| {
             self.peeked = null;
@@ -162,6 +180,7 @@ pub const JsonScanner = struct {
         return self.next_inner();
     }
 
+    /// Return the next token without consuming it
     pub fn peek(self: *JsonScanner) JsonError!?JsonToken {
         if (self.peeked) |tok| {
             return tok;
@@ -215,6 +234,7 @@ pub const JsonScanner = struct {
 
 // ── Scanner Helper Functions ──────────────────────────────────────────
 
+/// Skip over a complete JSON value, including nested objects and arrays
 pub fn skip_value(scanner: *JsonScanner) JsonError!void {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     switch (tok) {
@@ -247,6 +267,7 @@ pub fn skip_value(scanner: *JsonScanner) JsonError!void {
     }
 }
 
+/// Read and return a JSON string token
 pub fn read_string(scanner: *JsonScanner) JsonError![]const u8 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     switch (tok) {
@@ -255,6 +276,7 @@ pub fn read_string(scanner: *JsonScanner) JsonError![]const u8 {
     }
 }
 
+/// Read a base64-encoded JSON string and decode it to bytes
 pub fn read_bytes(scanner: *JsonScanner, allocator: std.mem.Allocator) JsonError![]const u8 {
     const b64_str = try read_string(scanner);
     if (b64_str.len == 0) {
@@ -274,6 +296,7 @@ pub fn read_bytes(scanner: *JsonScanner, allocator: std.mem.Allocator) JsonError
     return buf;
 }
 
+/// Read a JSON boolean value
 pub fn read_bool(scanner: *JsonScanner) JsonError!bool {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     switch (tok) {
@@ -283,6 +306,7 @@ pub fn read_bool(scanner: *JsonScanner) JsonError!bool {
     }
 }
 
+/// Read a JSON number or string as an i32
 pub fn read_int32(scanner: *JsonScanner) JsonError!i32 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -293,6 +317,7 @@ pub fn read_int32(scanner: *JsonScanner) JsonError!i32 {
     return std.fmt.parseInt(i32, text, 10) catch return JsonError.Overflow;
 }
 
+/// Read a JSON number or string as an i64
 pub fn read_int64(scanner: *JsonScanner) JsonError!i64 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -303,6 +328,7 @@ pub fn read_int64(scanner: *JsonScanner) JsonError!i64 {
     return std.fmt.parseInt(i64, text, 10) catch return JsonError.Overflow;
 }
 
+/// Read a JSON number or string as a u32
 pub fn read_uint32(scanner: *JsonScanner) JsonError!u32 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -313,6 +339,7 @@ pub fn read_uint32(scanner: *JsonScanner) JsonError!u32 {
     return std.fmt.parseInt(u32, text, 10) catch return JsonError.Overflow;
 }
 
+/// Read a JSON number or string as a u64
 pub fn read_uint64(scanner: *JsonScanner) JsonError!u64 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -323,6 +350,7 @@ pub fn read_uint64(scanner: *JsonScanner) JsonError!u64 {
     return std.fmt.parseInt(u64, text, 10) catch return JsonError.Overflow;
 }
 
+/// Read a JSON number or string as an f32, handling NaN/Infinity
 pub fn read_float32(scanner: *JsonScanner) JsonError!f32 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -336,6 +364,7 @@ pub fn read_float32(scanner: *JsonScanner) JsonError!f32 {
     return std.fmt.parseFloat(f32, text) catch return JsonError.InvalidNumber;
 }
 
+/// Read a JSON number or string as an f64, handling NaN/Infinity
 pub fn read_float64(scanner: *JsonScanner) JsonError!f64 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
@@ -349,6 +378,7 @@ pub fn read_float64(scanner: *JsonScanner) JsonError!f64 {
     return std.fmt.parseFloat(f64, text) catch return JsonError.InvalidNumber;
 }
 
+/// Read an enum value as an i32 from a JSON number or string
 pub fn read_enum_int(scanner: *JsonScanner) JsonError!i32 {
     const tok = try scanner.next() orelse return JsonError.UnexpectedEndOfInput;
     const text = switch (tok) {
