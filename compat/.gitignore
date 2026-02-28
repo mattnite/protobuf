@@ -1,2 +1,4 @@
 testdata/zig/
 testdata/go/
+go/rpcserver
+go/rpcclient
