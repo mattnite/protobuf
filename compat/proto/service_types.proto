@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+enum Priority {
+    LOW = 0;
+    MEDIUM = 1;
+    HIGH = 2;
+    CRITICAL = 3;
+}
+
+message InnerDetail {
+    string description = 1;
+}
+
+message ComplexRequest {
+    string name = 1;
+    Priority priority = 2;
+    InnerDetail detail = 3;
+    repeated string tags = 4;
+    map<string, string> metadata = 5;
+}
+
+message ComplexResponse {
+    int32 id = 1;
+    Priority priority = 2;
+    repeated InnerDetail details = 3;
+}
+
+service TypesService {
+    rpc ProcessComplex(ComplexRequest) returns (ComplexResponse);
+    rpc StreamComplex(ComplexRequest) returns (stream ComplexResponse);
+}

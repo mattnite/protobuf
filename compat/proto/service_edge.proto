@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+message EdgeRequest {
+    int32 id = 1;
+    string label = 2;
+}
+
+message EdgeResponse {
+    int32 id = 1;
+    string status = 2;
+}
+
+service SingleMethodService {
+    rpc OnlyMethod(EdgeRequest) returns (EdgeResponse);
+}
+
+service ManyMethodsService {
+    rpc Create(EdgeRequest) returns (EdgeResponse);
+    rpc Read(EdgeRequest) returns (EdgeResponse);
+    rpc Update(EdgeRequest) returns (EdgeResponse);
+    rpc Delete(EdgeRequest) returns (EdgeResponse);
+    rpc List(EdgeRequest) returns (EdgeResponse);
+    rpc Count(EdgeRequest) returns (EdgeResponse);
+    rpc Exists(EdgeRequest) returns (EdgeResponse);
+    rpc Validate(EdgeRequest) returns (EdgeResponse);
+}

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+message StreamRequest {
+    string query = 1;
+}
+
+message StreamResponse {
+    string result = 1;
+    int32 index = 2;
+}
+
+message UploadChunk {
+    bytes data = 1;
+}
+
+message UploadResult {
+    int32 total_chunks = 1;
+    string summary = 2;
+}
+
+message ChatMessage {
+    string sender = 1;
+    string text = 2;
+}
+
+service StreamingService {
+    rpc UnaryCall(StreamRequest) returns (StreamResponse);
+    rpc ServerSide(StreamRequest) returns (stream StreamResponse);
+    rpc ClientSide(stream UploadChunk) returns (UploadResult);
+    rpc Bidirectional(stream ChatMessage) returns (stream ChatMessage);
+}

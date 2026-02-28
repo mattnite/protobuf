@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+message RequestA {
+    string name = 1;
+}
+
+message ResponseA {
+    string greeting = 1;
+}
+
+message RequestB {
+    int32 value = 1;
+    string label = 2;
+}
+
+message ResponseB {
+    int32 result = 1;
+    string description = 2;
+}
+
+service FirstService {
+    rpc MethodOne(RequestA) returns (ResponseA);
+    rpc MethodTwo(RequestB) returns (ResponseB);
+}
+
+service SecondService {
+    rpc Reverse(ResponseA) returns (RequestA);
+    rpc Transform(RequestB) returns (ResponseB);
+}
+
+service ThirdService {
+    rpc StreamExchange(stream RequestA) returns (stream ResponseA);
+}

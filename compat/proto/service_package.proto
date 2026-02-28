@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package myapp.services.v1;
+
+message LookupRequest {
+    string key = 1;
+}
+
+message LookupResponse {
+    string value = 1;
+    bool found = 2;
+}
+
+service PackagedService {
+    rpc Lookup(LookupRequest) returns (LookupResponse);
+    rpc ReverseLookup(LookupResponse) returns (LookupRequest);
+}
