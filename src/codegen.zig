@@ -17,7 +17,7 @@ pub const services = @import("codegen/services.zig");
 const Emitter = emitter.Emitter;
 
 /// Generate a complete Zig source file from a proto AST File.
-pub fn generate_file(allocator: std.mem.Allocator, file: ast.File, proto_filename: []const u8) ![]const u8 {
+pub fn generate_file(allocator: std.mem.Allocator, file: ast.File, proto_filename: []const u8, global_enum_names: []const []const u8) ![]const u8 {
     // Same-file extension flattening: merge extend blocks into target messages.
     try flatten_extensions(allocator, file.messages, file.extensions);
     for (file.messages) |*msg| {
@@ -25,12 +25,15 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File, proto_filenam
     }
 
     // Resolve enum type references before codegen.
-    // Collect file-level enum names, then walk all messages to replace
-    // .named TypeRefs with .enum_ref where the name matches an enum.
+    // Collect file-level enum names, then combine with global enum names
+    // to handle both same-file and cross-file enum references.
     var file_enum_names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer file_enum_names.deinit(allocator);
     for (file.enums) |en| {
         try file_enum_names.append(allocator, en.name);
+    }
+    for (global_enum_names) |name| {
+        try file_enum_names.append(allocator, name);
     }
     for (file.messages) |*msg| {
         resolve_message_enum_refs(msg, file_enum_names.items);
@@ -48,6 +51,26 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File, proto_filenam
         try e.print("const json = protobuf.json;\n", .{});
         try e.print("const text_format = protobuf.text_format;\n", .{});
     }
+
+    // Import external package namespaces referenced by type names
+    {
+        var external_roots = std.StringHashMap(void).init(allocator);
+        defer external_roots.deinit();
+        try collect_external_package_roots(file, &external_roots);
+
+        if (external_roots.count() > 0) {
+            // Compute relative path to root.zig from this file's location.
+            // File path depth is determined by the package: "foo.bar" → depth 2
+            const root_path = try relative_root_path(allocator, file.package);
+            try e.print("const _root = @import(\"{s}\");\n", .{root_path});
+
+            var ext_iter = external_roots.iterator();
+            while (ext_iter.next()) |entry| {
+                try e.print("const {s} = _root.@\"{s}\";\n", .{ entry.key_ptr.*, entry.key_ptr.* });
+            }
+        }
+    }
+
     try e.blank_line();
 
     // Top-level enums
@@ -58,11 +81,16 @@ pub fn generate_file(allocator: std.mem.Allocator, file: ast.File, proto_filenam
         try e.blank_line();
     }
 
+    // Detect recursive message types (for pointer indirection)
+    var recursive_types = std.StringHashMap(void).init(allocator);
+    defer recursive_types.deinit();
+    try find_recursive_types(file.messages, &recursive_types);
+
     // Top-level messages
     for (file.messages) |msg| {
         var name_buf: [512]u8 = undefined;
         const full_name = qualified_name(file.package, msg.name, &name_buf);
-        try messages.emit_message(&e, msg, file.syntax, full_name);
+        try messages.emit_message(&e, msg, file.syntax, full_name, &recursive_types);
         try e.blank_line();
     }
 
@@ -217,20 +245,38 @@ fn merge_extension_fields(allocator: std.mem.Allocator, msg: *ast.Message, ext: 
     // Collect valid extension fields
     var valid_fields: std.ArrayListUnmanaged(ast.Field) = .empty;
     defer valid_fields.deinit(allocator);
+    // Collect valid extension groups
+    var valid_groups: std.ArrayListUnmanaged(ast.Group) = .empty;
+    defer valid_groups.deinit(allocator);
 
     for (ext.fields) |field| {
         if (field_in_extension_ranges(field.number, msg.extension_ranges)) {
             try valid_fields.append(allocator, field);
         }
     }
+    for (ext.groups) |group| {
+        if (field_in_extension_ranges(group.number, msg.extension_ranges)) {
+            try valid_groups.append(allocator, group);
+        }
+    }
 
-    if (valid_fields.items.len == 0) return;
+    if (valid_fields.items.len == 0 and valid_groups.items.len == 0) return;
 
-    // Create new combined fields slice
-    const new_fields = try allocator.alloc(ast.Field, msg.fields.len + valid_fields.items.len);
-    @memcpy(new_fields[0..msg.fields.len], msg.fields);
-    @memcpy(new_fields[msg.fields.len..], valid_fields.items);
-    msg.fields = new_fields;
+    if (valid_fields.items.len > 0) {
+        // Create new combined fields slice
+        const new_fields = try allocator.alloc(ast.Field, msg.fields.len + valid_fields.items.len);
+        @memcpy(new_fields[0..msg.fields.len], msg.fields);
+        @memcpy(new_fields[msg.fields.len..], valid_fields.items);
+        msg.fields = new_fields;
+    }
+
+    if (valid_groups.items.len > 0) {
+        // Create new combined groups slice
+        const new_groups = try allocator.alloc(ast.Group, msg.groups.len + valid_groups.items.len);
+        @memcpy(new_groups[0..msg.groups.len], msg.groups);
+        @memcpy(new_groups[msg.groups.len..], valid_groups.items);
+        msg.groups = new_groups;
+    }
 }
 
 fn field_in_extension_ranges(number: i32, ranges: []const ast.ExtensionRange) bool {
@@ -315,6 +361,211 @@ fn is_enum_name(name: []const u8, enum_names: []const []const u8) bool {
         if (std.mem.eql(u8, name, en)) return true;
     }
     return false;
+}
+
+// ── Recursive Type Detection ─────────────────────────────────────────
+
+/// Find all message type names that participate in recursive size-dependency cycles.
+/// These types need pointer indirection (`?*T` instead of `?T`) to avoid Zig's
+/// "struct depends on itself" error.
+fn find_recursive_types(file_messages: []const ast.Message, result: *std.StringHashMap(void)) !void {
+    // Build a type dependency graph: message_name → set of message_names it references
+    var graph = std.StringHashMap(std.StringHashMap(void)).init(result.allocator);
+    defer {
+        var it = graph.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        graph.deinit();
+    }
+
+    // Collect all message names and their dependencies
+    for (file_messages) |msg| {
+        try collect_msg_deps(msg, &graph, result.allocator);
+    }
+
+    // Find all types in cycles using iterative DFS with color marking
+    // White (0) = unvisited, Grey (1) = in current path, Black (2) = fully explored
+    const Color = enum { white, grey, black };
+    var colors = std.StringHashMap(Color).init(result.allocator);
+    defer colors.deinit();
+
+    // Initialize all nodes as white
+    var node_iter = graph.iterator();
+    while (node_iter.next()) |entry| {
+        try colors.put(entry.key_ptr.*, .white);
+    }
+
+    // For each unvisited node, do DFS to find cycles
+    var stack: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer stack.deinit(result.allocator);
+
+    node_iter = graph.iterator();
+    while (node_iter.next()) |entry| {
+        const start = entry.key_ptr.*;
+        if (colors.get(start) != .white) continue;
+
+        // DFS from this node
+        stack.clearRetainingCapacity();
+        try stack.append(result.allocator, start);
+        colors.getPtr(start).?.* = .grey;
+
+        while (stack.items.len > 0) {
+            const current = stack.items[stack.items.len - 1];
+            var found_unvisited = false;
+
+            if (graph.get(current)) |deps| {
+                var dep_iter = deps.iterator();
+                while (dep_iter.next()) |dep| {
+                    const dep_name = dep.key_ptr.*;
+                    const color = colors.get(dep_name) orelse continue;
+                    switch (color) {
+                        .grey => {
+                            // Found a cycle! Mark all nodes in the cycle path
+                            var in_cycle = false;
+                            for (stack.items) |node| {
+                                if (std.mem.eql(u8, node, dep_name)) in_cycle = true;
+                                if (in_cycle) try result.put(node, {});
+                            }
+                        },
+                        .white => {
+                            colors.getPtr(dep_name).?.* = .grey;
+                            try stack.append(result.allocator, dep_name);
+                            found_unvisited = true;
+                            break;
+                        },
+                        .black => {},
+                    }
+                }
+            }
+
+            if (!found_unvisited) {
+                colors.getPtr(current).?.* = .black;
+                _ = stack.pop();
+            }
+        }
+    }
+}
+
+/// Recursively collect message type dependencies into the graph
+fn collect_msg_deps(msg: ast.Message, graph: *std.StringHashMap(std.StringHashMap(void)), allocator: std.mem.Allocator) !void {
+    var deps = std.StringHashMap(void).init(allocator);
+
+    // Regular fields
+    for (msg.fields) |f| {
+        switch (f.type_name) {
+            .named => |name| try deps.put(name, {}),
+            .scalar, .enum_ref => {},
+        }
+    }
+
+    // Oneof fields
+    for (msg.oneofs) |o| {
+        for (o.fields) |f| {
+            switch (f.type_name) {
+                .named => |name| try deps.put(name, {}),
+                .scalar, .enum_ref => {},
+            }
+        }
+    }
+
+    // Map value types
+    for (msg.maps) |m| {
+        switch (m.value_type) {
+            .named => |name| try deps.put(name, {}),
+            .scalar, .enum_ref => {},
+        }
+    }
+
+    // Group fields
+    for (msg.groups) |g| {
+        for (g.fields) |f| {
+            switch (f.type_name) {
+                .named => |name| try deps.put(name, {}),
+                .scalar, .enum_ref => {},
+            }
+        }
+    }
+
+    try graph.put(msg.name, deps);
+
+    // Recurse into nested messages
+    for (msg.nested_messages) |nested| {
+        try collect_msg_deps(nested, graph, allocator);
+    }
+}
+
+/// Compute the relative path from a generated file's location back to root.zig.
+/// A file with package "foo.bar" lives at "foo/bar.zig" (in directory "foo/"),
+/// so it needs "../root.zig". No package → "root.zig".
+fn relative_root_path(allocator: std.mem.Allocator, package: ?[]const u8) ![]const u8 {
+    const pkg = package orelse return "root.zig";
+    if (pkg.len == 0) return "root.zig";
+
+    // Count directory depth: number of dots in package name = number of "../" needed
+    // e.g. "foo" → depth 1, "foo.bar" → depth 2 (BUT "foo" generates foo.zig in root
+    // dir, so depth is actually the number of dots, not dots+1)
+    // "foo" → file at "foo.zig" → same dir as root.zig → "root.zig"
+    // "foo.bar" → file at "foo/bar.zig" → one dir deep → "../root.zig"
+    // "a.b.c" → file at "a/b/c.zig" → two dirs deep → "../../root.zig"
+    var depth: usize = 0;
+    for (pkg) |c| {
+        if (c == '.') depth += 1;
+    }
+
+    if (depth == 0) return "root.zig";
+
+    // Build "../" * depth + "root.zig"
+    const result = try allocator.alloc(u8, depth * 3 + 8); // "../" * depth + "root.zig"
+    var idx: usize = 0;
+    for (0..depth) |_| {
+        @memcpy(result[idx..][0..3], "../");
+        idx += 3;
+    }
+    @memcpy(result[idx..][0..8], "root.zig");
+    return result;
+}
+
+/// Collect top-level package roots from external type references.
+/// For example, if a type reference is "google.protobuf.BoolValue",
+/// the root "google" is collected. Only collects names that contain dots
+/// (indicating package-qualified references to external types).
+fn collect_external_package_roots(file: ast.File, roots: *std.StringHashMap(void)) !void {
+    for (file.messages) |msg| {
+        try collect_msg_external_roots(msg, roots);
+    }
+}
+
+fn collect_msg_external_roots(msg: ast.Message, roots: *std.StringHashMap(void)) !void {
+    for (msg.fields) |f| {
+        try collect_typeref_root(f.type_name, roots);
+    }
+    for (msg.maps) |m| {
+        try collect_typeref_root(m.value_type, roots);
+    }
+    for (msg.oneofs) |o| {
+        for (o.fields) |f| {
+            try collect_typeref_root(f.type_name, roots);
+        }
+    }
+    for (msg.nested_messages) |nested| {
+        try collect_msg_external_roots(nested, roots);
+    }
+}
+
+fn collect_typeref_root(type_ref: ast.TypeRef, roots: *std.StringHashMap(void)) !void {
+    const name = switch (type_ref) {
+        .named => |n| n,
+        .enum_ref => |n| n,
+        .scalar => return,
+    };
+    // Only interested in qualified names with dots (external packages)
+    if (std.mem.indexOfScalar(u8, name, '.')) |dot| {
+        const root = name[0..dot];
+        if (root.len > 0) {
+            try roots.put(root, {});
+        }
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -409,7 +660,7 @@ test "generate_file: proto3 file with enum and message" {
     file.enums = &file_enums;
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Verify imports
@@ -449,7 +700,7 @@ test "generate_file: proto2 file with required/optional fields" {
     var file = make_file(.proto2);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, "pub const LegacyUser = struct {");
@@ -497,7 +748,7 @@ test "generate_file: nested messages and enums" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, "pub const Outer = struct {");
@@ -543,7 +794,7 @@ test "generate_file: map fields, oneofs, repeated fields" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Map field
@@ -551,7 +802,7 @@ test "generate_file: map fields, oneofs, repeated fields" {
     // Oneof type
     try expect_contains(output, "pub const Payload = union(enum)");
     // Oneof field
-    try expect_contains(output, "    payload: ?Payload = null,");
+    try expect_contains(output, "    payload: ?@This().Payload = null,");
     // Repeated
     try expect_contains(output, "    tags: []const []const u8 = &.{},");
 }
@@ -611,7 +862,7 @@ test "generate_file: service with unary method" {
     file.package = "routeguide";
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // rpc import
@@ -644,7 +895,7 @@ test "generate_file: all streaming modes" {
     var file = make_file(.proto3);
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Server VTable
@@ -681,7 +932,7 @@ test "generate_file: service with package path" {
     file.package = "pkg";
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, ".name = \"pkg.Svc\"");
@@ -708,7 +959,7 @@ test "generate_file: service without package" {
     var file = make_file(.proto3);
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, ".name = \"Svc\"");
@@ -742,7 +993,7 @@ test "generate_file: multiple services" {
     var file = make_file(.proto3);
     file.services = &file_services;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, "pub const Svc1 = struct");
@@ -752,7 +1003,7 @@ test "generate_file: multiple services" {
 test "generate_file: no rpc import without services" {
     const file = make_file(.proto3);
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Should NOT contain rpc import when there are no services
@@ -774,7 +1025,7 @@ test "generate_file: json import when messages present" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, "const json = protobuf.json;");
@@ -784,7 +1035,7 @@ test "generate_file: json import when messages present" {
 test "generate_file: no json import without messages" {
     const file = make_file(.proto3);
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     if (std.mem.indexOf(u8, output, "const json = protobuf.json;") != null) {
@@ -824,7 +1075,7 @@ test "generate_file: file descriptor with package" {
     file.enums = &file_enums;
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // File descriptor
@@ -855,7 +1106,7 @@ test "generate_file: file descriptor without package" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "point.proto");
+    const output = try generate_file(testing.allocator, file, "point.proto", &.{});
     defer testing.allocator.free(output);
 
     try expect_contains(output, ".name = \"point.proto\",");
@@ -866,7 +1117,7 @@ test "generate_file: file descriptor without package" {
 test "generate_file: no file descriptor when no messages or enums" {
     const file = make_file(.proto3);
 
-    const output = try generate_file(testing.allocator, file, "empty.proto");
+    const output = try generate_file(testing.allocator, file, "empty.proto", &.{});
     defer testing.allocator.free(output);
 
     if (std.mem.indexOf(u8, output, "_file_descriptor") != null) {
@@ -911,7 +1162,7 @@ test "generate_file: message descriptor with nested types" {
     file.package = "pkg";
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Nested messages and enums referenced in descriptor
@@ -957,7 +1208,7 @@ test "generate_file: message descriptor with map and oneof" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Map descriptor
@@ -1005,7 +1256,7 @@ test "generate_file: field descriptor with enum and message refs" {
     var file = make_file(.proto3);
     file.messages = &file_msgs;
 
-    const output = try generate_file(testing.allocator, file, "test.proto");
+    const output = try generate_file(testing.allocator, file, "test.proto", &.{});
     defer testing.allocator.free(output);
 
     // Enum field

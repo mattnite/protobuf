@@ -73,6 +73,41 @@ pub fn build(b: *std.Build) void {
     });
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&b.addRunArtifact(bench).step);
+
+    // AFL++ fuzz harness (only configured when -Dfuzz-target is provided)
+    const fuzz_target = b.option([]const u8, "fuzz-target", "Fuzz target to build (e.g. lexer, parser, varint_decode)");
+    const llvm_config_path = b.option([]const u8, "llvm-config-path", "Path to llvm-config (default: search PATH)");
+
+    const fuzz_step = b.step("fuzz", "Build AFL++ fuzz harness");
+
+    if (fuzz_target) |ft| {
+        const fuzz_options = b.addOptions();
+        fuzz_options.addOption([]const u8, "fuzz_target", ft);
+
+        const fuzz_obj = b.addObject(.{
+            .name = "protobuf-fuzz",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/fuzz_harness.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "protobuf", .module = protobuf_mod },
+                    .{ .name = "build_options", .module = fuzz_options.createModule() },
+                },
+            }),
+        });
+        fuzz_obj.root_module.stack_check = false;
+        fuzz_obj.root_module.link_libc = true;
+
+        {
+            const afl = @import("afl_kit");
+            const llvm_cfg: ?[]const []const u8 = if (llvm_config_path) |p| &.{p} else null;
+            if (afl.addInstrumentedExe(b, target, optimize, llvm_cfg, true, fuzz_obj, &.{})) |fuzz_exe| {
+                const install = b.addInstallBinFile(fuzz_exe, "protobuf-fuzz");
+                fuzz_step.dependOn(&install.step);
+            }
+        }
+    }
 }
 
 /// Create a GenerateStep that compiles .proto files into importable Zig modules.

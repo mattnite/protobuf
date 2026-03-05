@@ -23,7 +23,7 @@ fn run_standalone_pipeline(allocator: std.mem.Allocator, proto_source: []const u
     var files_arr = [_]ast.File{file};
     const resolved = try linker.link(&files_arr);
 
-    return try codegen_mod.generate_file(allocator, resolved.files[0].source, filename);
+    return try codegen_mod.generate_file(allocator, resolved.files[0].source, filename, &.{});
 }
 
 // ── Protoc Plugin Pipeline ───────────────────────────────────────────

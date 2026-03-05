@@ -1,11 +1,13 @@
 const std = @import("std");
 const testing = std.testing;
 
+/// Small helper for indentation-aware code emission into an in-memory buffer.
 pub const Emitter = struct {
     output: std.ArrayList(u8),
     indent_level: u32,
     allocator: std.mem.Allocator,
 
+    /// Create an emitter backed by `allocator`.
     pub fn init(allocator: std.mem.Allocator) Emitter {
         return .{
             .output = .empty,
@@ -14,34 +16,41 @@ pub const Emitter = struct {
         };
     }
 
+    /// Free the backing output buffer.
     pub fn deinit(self: *Emitter) void {
         self.output.deinit(self.allocator);
     }
 
+    /// Return the currently-emitted output slice.
     pub fn get_output(self: *const Emitter) []const u8 {
         return self.output.items;
     }
 
+    /// Print a formatted line at the current indentation.
     pub fn print(self: *Emitter, comptime fmt: []const u8, args: anytype) !void {
         try self.indent();
         try self.output.writer(self.allocator).print(fmt, args);
     }
 
+    /// Print formatted output without automatic indentation.
     pub fn print_raw(self: *Emitter, comptime fmt: []const u8, args: anytype) !void {
         try self.output.writer(self.allocator).print(fmt, args);
     }
 
+    /// Emit an opening brace and increase indentation.
     pub fn open_brace(self: *Emitter) !void {
         try self.print_raw(" {{\n", .{});
         self.indent_level += 1;
     }
 
+    /// Emit a closing brace with trailing semicolon and decrease indentation.
     pub fn close_brace(self: *Emitter) !void {
         self.indent_level -= 1;
         try self.indent();
         try self.print_raw("}};\n", .{});
     }
 
+    /// Emit a closing brace without semicolon and decrease indentation.
     pub fn close_brace_nosemi(self: *Emitter) !void {
         self.indent_level -= 1;
         try self.indent();
@@ -55,10 +64,12 @@ pub const Emitter = struct {
         try self.print_raw("}},\n", .{});
     }
 
+    /// Emit a blank line.
     pub fn blank_line(self: *Emitter) !void {
         try self.print_raw("\n", .{});
     }
 
+    /// Write indentation spaces for the current indentation level.
     pub fn indent(self: *Emitter) !void {
         for (0..self.indent_level) |_| {
             try self.print_raw("    ", .{});

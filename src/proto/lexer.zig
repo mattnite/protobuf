@@ -756,3 +756,12 @@ test "fuzz: Lexer handles arbitrary input" {
         }
     }.run, .{});
 }
+
+test "fuzz: resolve_string does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            const result = resolve_string(input, std.testing.allocator) catch return;
+            std.testing.allocator.free(result);
+        }
+    }.run, .{});
+}

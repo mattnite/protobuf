@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "protobuf-conformance": "^34.0.0"
+  }
+}

@@ -3,6 +3,7 @@ const testing = std.testing;
 const ast = @import("../proto/ast.zig");
 const Emitter = @import("emitter.zig").Emitter;
 
+/// Emit Zig source for a protobuf enum and its descriptor metadata.
 pub fn emit_enum(e: *Emitter, en: ast.Enum, syntax: ast.Syntax, full_name: []const u8) !void {
     try e.print("/// Protocol Buffers enum: {s}\n", .{en.name});
     try e.print("pub const {s} = enum(i32)", .{en.name});

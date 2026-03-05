@@ -200,6 +200,7 @@ pub const Option = struct {
 pub const OptionName = struct {
     parts: []Part,
 
+    /// One segment of an option path, optionally extension-qualified.
     pub const Part = struct {
         name: []const u8,
         is_extension: bool,

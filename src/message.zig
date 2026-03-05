@@ -10,6 +10,9 @@ pub const default_max_decode_depth: usize = 100;
 /// Errors that can occur during message-level encoding and decoding
 pub const Error = error{ EndOfStream, Overflow, InvalidWireType, InvalidFieldNumber, RecursionLimitExceeded, InvalidUtf8 };
 
+/// Complete error set for generated decode_inner methods (Error + allocation)
+pub const DecodeError = Error || error{OutOfMemory};
+
 /// Validate that a byte slice contains valid UTF-8
 pub fn validate_utf8(data: []const u8) error{InvalidUtf8}!void {
     if (!std.unicode.utf8ValidateSlice(data)) return error.InvalidUtf8;
@@ -47,7 +50,10 @@ fn decode_varint_slice(data: []const u8, pos: *usize) error{ EndOfStream, Overfl
 }
 
 fn decode_tag_slice(data: []const u8, pos: *usize) Error!encoding.Tag {
+    const start_pos = pos.*;
     const raw = try decode_varint_slice(data, pos);
+    // Tags must use a canonical varint encoding; reject overlong forms.
+    if (pos.* - start_pos != encoding.varint_size(raw)) return error.InvalidFieldNumber;
     const wire_type_int: u3 = @intCast(raw & 0x07);
     if (wire_type_int > 5) return error.InvalidWireType;
     const field_number_raw = raw >> 3;
@@ -132,7 +138,7 @@ pub fn skip_group_depth(data: []const u8, pos: *usize, field_number: u29, depth_
         const tag = try decode_tag_slice(data, pos);
         if (tag.wire_type == .egroup) {
             if (tag.field_number == field_number) return;
-            continue;
+            return error.InvalidFieldNumber;
         }
         if (tag.wire_type == .sgroup) {
             try skip_group_depth(data, pos, tag.field_number, depth_remaining - 1);
@@ -552,12 +558,12 @@ test "skip_group: nested groups" {
     try testing.expectEqual(@as(usize, 5), pos);
 }
 
-test "skip_group: mismatched egroup field number continues" {
+test "skip_group: mismatched egroup field number returns InvalidFieldNumber" {
     // egroup field 2 (0x14), then field 3 varint 1 (0x18 0x01), then egroup field 1 (0x0C)
     const data = [_]u8{ 0x14, 0x18, 0x01, 0x0C };
     var pos: usize = 0;
-    try skip_group(&data, &pos, 1);
-    try testing.expectEqual(@as(usize, 4), pos);
+    try testing.expectError(error.InvalidFieldNumber, skip_group(&data, &pos, 1));
+    try testing.expectEqual(@as(usize, 1), pos);
 }
 
 test "skip_group: no matching egroup returns EndOfStream" {
@@ -983,6 +989,117 @@ test "fuzz: FieldIterator handles arbitrary input" {
         fn run(_: void, input: []const u8) anyerror!void {
             var iter = iterate_fields(input);
             while (iter.next() catch return) |_| {}
+        }
+    }.run, .{});
+}
+
+test "fuzz: skip_field does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            // Try skipping with each wire type
+            inline for (.{ encoding.WireType.varint, encoding.WireType.i64, encoding.WireType.i32, encoding.WireType.len, encoding.WireType.egroup }) |wt| {
+                var pos: usize = 0;
+                _ = skip_field(input, &pos, wt) catch {};
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz: skip_group does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 1) return;
+            // Use first byte to derive a field number (1..255)
+            const field_num: u29 = @as(u29, input[0] % 255) + 1;
+            var pos: usize = 1;
+            _ = skip_group(input, &pos, field_num) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz: PackedVarintIterator does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var iter = PackedVarintIterator.init(input);
+            while (iter.next() catch return) |_| {}
+        }
+    }.run, .{});
+}
+
+test "fuzz: PackedFixed32Iterator does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var iter = PackedFixed32Iterator.init(input);
+            while (iter.next() catch return) |_| {}
+        }
+    }.run, .{});
+}
+
+test "fuzz: PackedFixed64Iterator does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var iter = PackedFixed64Iterator.init(input);
+            while (iter.next() catch return) |_| {}
+        }
+    }.run, .{});
+}
+
+test "fuzz: MessageWriter then FieldIterator round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            // Use input bytes to drive construction of fields, then verify iterator can read them
+            if (input.len < 2) return;
+            var buf: [4096]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            const mw = MessageWriter.init(&w);
+
+            var i: usize = 0;
+            var field_count: usize = 0;
+            while (i + 1 < input.len) {
+                const wire_choice = input[i] % 4; // varint, i32, i64, len
+                const field_number: u29 = @as(u29, input[i + 1] % 255) + 1;
+                i += 2;
+
+                switch (wire_choice) {
+                    0 => { // varint
+                        if (i + 8 > input.len) return;
+                        const val: u64 = @bitCast(input[i..][0..8].*);
+                        mw.write_varint_field(field_number, val) catch return;
+                        i += 8;
+                    },
+                    1 => { // i32
+                        if (i + 4 > input.len) return;
+                        const val: u32 = @bitCast(input[i..][0..4].*);
+                        mw.write_i32_field(field_number, val) catch return;
+                        i += 4;
+                    },
+                    2 => { // i64
+                        if (i + 8 > input.len) return;
+                        const val: u64 = @bitCast(input[i..][0..8].*);
+                        mw.write_i64_field(field_number, val) catch return;
+                        i += 8;
+                    },
+                    3 => { // len
+                        if (i >= input.len) return;
+                        const len: usize = @min(input[i], 64); // cap at 64 bytes
+                        i += 1;
+                        if (i + len > input.len) return;
+                        mw.write_len_field(field_number, input[i..][0..len]) catch return;
+                        i += len;
+                    },
+                    else => unreachable,
+                }
+                field_count += 1;
+            }
+
+            // Now iterate back and verify we get the same number of fields
+            const encoded = w.buffered();
+            var iter = iterate_fields(encoded);
+            var decoded_count: usize = 0;
+            while (try iter.next()) |_| {
+                decoded_count += 1;
+            }
+            if (decoded_count != field_count) return error.FieldCountMismatch;
         }
     }.run, .{});
 }

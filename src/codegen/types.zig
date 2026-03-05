@@ -4,6 +4,7 @@ const ast = @import("../proto/ast.zig");
 
 const ScalarType = ast.ScalarType;
 
+/// Return the Zig type used for a protobuf scalar.
 pub fn scalar_zig_type(s: ScalarType) []const u8 {
     return switch (s) {
         .double => "f64",
@@ -24,6 +25,7 @@ pub fn scalar_zig_type(s: ScalarType) []const u8 {
     };
 }
 
+/// Return the protobuf wire-type tag literal for a scalar.
 pub fn scalar_wire_type(s: ScalarType) []const u8 {
     return switch (s) {
         .double => ".i64",
@@ -35,6 +37,7 @@ pub fn scalar_wire_type(s: ScalarType) []const u8 {
     };
 }
 
+/// Return the default-value literal for a scalar field in generated code.
 pub fn scalar_default_value(s: ScalarType) []const u8 {
     return switch (s) {
         .double, .float => "0",
@@ -45,6 +48,7 @@ pub fn scalar_default_value(s: ScalarType) []const u8 {
     };
 }
 
+/// Return the encoding function name in `encoding.zig` for a scalar.
 pub fn scalar_encode_fn(s: ScalarType) []const u8 {
     return switch (s) {
         .double => "encode_double",
@@ -107,6 +111,7 @@ pub fn scalar_size_fn(s: ScalarType) []const u8 {
 /// Returns the category of packed encoding for a scalar type.
 pub const PackedCategory = enum { varint, fixed32, fixed64 };
 
+/// Return the packed encoding category for a scalar.
 pub fn scalar_packed_category(s: ScalarType) PackedCategory {
     return switch (s) {
         .int32, .int64, .uint32, .uint64, .sint32, .sint64, .bool => .varint,
@@ -229,6 +234,7 @@ pub fn scalar_descriptor_type(s: ScalarType) []const u8 {
     };
 }
 
+/// Whether the scalar can be encoded in packed form.
 pub fn is_packable_scalar(s: ScalarType) bool {
     return s != .string and s != .bytes;
 }
@@ -281,6 +287,7 @@ const zig_keywords = [_][]const u8{
     "var",        "volatile",   "while",
 };
 
+/// Escape names that collide with Zig keywords or reserved identifier forms.
 pub fn escape_zig_keyword(name: []const u8) EscapedName {
     for (zig_keywords) |kw| {
         if (std.mem.eql(u8, name, kw)) {
@@ -294,10 +301,12 @@ pub fn escape_zig_keyword(name: []const u8) EscapedName {
     return .{ .escaped = false, .name = name };
 }
 
+/// A possibly-escaped Zig identifier wrapper with formatter support.
 pub const EscapedName = struct {
     escaped: bool,
     name: []const u8,
 
+    /// Format either as a raw identifier or `@"escaped"` identifier syntax.
     pub fn format(self: EscapedName, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.escaped) {
             try writer.print("@\"{s}\"", .{self.name});
@@ -307,13 +316,12 @@ pub const EscapedName = struct {
     }
 };
 
+/// Return the Zig key type for a protobuf map key scalar.
 pub fn map_key_zig_type(s: ScalarType) []const u8 {
     return scalar_zig_type(s);
 }
 
-/// Returns the map container type string for a map field.
-/// For string keys: std.StringArrayHashMapUnmanaged(V)
-/// For int keys: std.AutoArrayHashMapUnmanaged(K, V)
+/// Whether a map key scalar type should be treated as a string key.
 pub fn is_string_key(key_type: ScalarType) bool {
     return key_type == .string;
 }

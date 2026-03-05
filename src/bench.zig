@@ -178,6 +178,7 @@ fn print_result(result: BenchResult) void {
     }) catch {};
 }
 
+/// Run local encode/decode microbenchmarks for protobuf primitives.
 pub fn main() !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
 

@@ -749,6 +749,160 @@ test "boundary: field number 1" {
     try testing.expectEqual(@as(u29, 1), tag.field_number);
 }
 
+test "fuzz: varint decode does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var r: std.Io.Reader = .fixed(input);
+            _ = decode_varint(&r) catch return;
+        }
+    }.run, .{});
+}
+
+test "fuzz: varint encode/decode round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 8) return;
+            const value: u64 = @bitCast(input[0..8].*);
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            encode_varint(&w, value) catch return;
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = try decode_varint(&r);
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: zigzag 32-bit round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 4) return;
+            const value: i32 = @bitCast(input[0..4].*);
+            const decoded = zigzag_decode(zigzag_encode(value));
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: zigzag 64-bit round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 8) return;
+            const value: i64 = @bitCast(input[0..8].*);
+            const decoded = zigzag_decode_64(zigzag_encode_64(value));
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: tag decode does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            var r: std.Io.Reader = .fixed(input);
+            _ = decode_tag(&r) catch return;
+        }
+    }.run, .{});
+}
+
+test "fuzz: tag encode/decode round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 4) return;
+            const raw_field: u32 = @bitCast(input[0..4].*);
+            // field_number must be 1..maxInt(u29), wire_type must be 0..5
+            const wire_raw = raw_field % 6;
+            const field_raw = (raw_field >> 3);
+            if (field_raw == 0 or field_raw > std.math.maxInt(u29)) return;
+            const tag = Tag{
+                .field_number = @intCast(field_raw % std.math.maxInt(u29) + 1),
+                .wire_type = @enumFromInt(@as(u3, @intCast(wire_raw))),
+            };
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            encode_tag(&w, tag) catch return;
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = decode_tag(&r) catch return error.RoundTripFailed;
+            if (decoded.field_number != tag.field_number) return error.FieldMismatch;
+            if (decoded.wire_type != tag.wire_type) return error.WireTypeMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: fixed32 round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 4) return;
+            const value: u32 = @bitCast(input[0..4].*);
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            try encode_fixed32(&w, value);
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = try decode_fixed32(&r);
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: fixed64 round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 8) return;
+            const value: u64 = @bitCast(input[0..8].*);
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            try encode_fixed64(&w, value);
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = try decode_fixed64(&r);
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: int32 encode/decode round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 4) return;
+            const value: i32 = @bitCast(input[0..4].*);
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            try encode_int32(&w, value);
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = try decode_int32(&r);
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: sint32 encode/decode round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 4) return;
+            const value: i32 = @bitCast(input[0..4].*);
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            try encode_sint32(&w, value);
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = try decode_sint32(&r);
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
+test "fuzz: sint64 encode/decode round-trip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            if (input.len < 8) return;
+            const value: i64 = @bitCast(input[0..8].*);
+            var buf: [16]u8 = undefined;
+            var w: std.Io.Writer = .fixed(&buf);
+            try encode_sint64(&w, value);
+            var r: std.Io.Reader = .fixed(w.buffered());
+            const decoded = try decode_sint64(&r);
+            if (decoded != value) return error.RoundTripMismatch;
+        }
+    }.run, .{});
+}
+
 test "empty reader for each decode function" {
     {
         var r: std.Io.Reader = .fixed("");

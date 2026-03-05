@@ -217,8 +217,7 @@ pub const Parser = struct {
         if (negative) _ = try self.lexer.next();
 
         const num_tok = try self.expect_kind(.integer);
-        const num = try parse_int(num_tok.text);
-        const number: i32 = if (negative) -@as(i32, @intCast(num)) else @intCast(num);
+        const number: i32 = try self.parse_enum_number(num_tok, negative);
 
         var options: []ast.FieldOption = &.{};
         if ((try self.lexer.peek()).kind == .open_bracket) {
@@ -313,9 +312,9 @@ pub const Parser = struct {
                 }
                 // Check for label + group
                 if (is_label(tok.text)) {
-                    const label = label_from_text(tok.text, syntax);
                     // Peek ahead to see if this is a group
                     if (try self.is_group_coming()) {
+                        const label = try self.validated_label(tok.text, syntax, tok.location);
                         _ = try self.lexer.next(); // consume label
                         try groups.append(self.allocator, try self.parse_group_def(label));
                         continue;
@@ -352,7 +351,7 @@ pub const Parser = struct {
         const tok = try self.lexer.peek();
         if (tok.kind == .identifier and is_label(tok.text)) {
             if (try self.is_label_coming()) {
-                label = label_from_text(tok.text, syntax);
+                label = try self.validated_label(tok.text, syntax, tok.location);
                 _ = try self.lexer.next(); // consume label
             }
         }
@@ -361,7 +360,7 @@ pub const Parser = struct {
         const name = (try self.expect_kind(.identifier)).text;
         try self.expect_punct(.equals);
         const num_tok = try self.expect_kind(.integer);
-        const number: i32 = @intCast(try parse_int(num_tok.text));
+        const number: i32 = try self.parse_field_number(num_tok);
 
         var options: []ast.FieldOption = &.{};
         if ((try self.lexer.peek()).kind == .open_bracket) {
@@ -461,7 +460,7 @@ pub const Parser = struct {
             const field_name = (try self.expect_kind(.identifier)).text;
             try self.expect_punct(.equals);
             const num_tok = try self.expect_kind(.integer);
-            const number: i32 = @intCast(try parse_int(num_tok.text));
+            const number: i32 = try self.parse_field_number(num_tok);
 
             var field_options: []ast.FieldOption = &.{};
             if ((try self.lexer.peek()).kind == .open_bracket) {
@@ -508,7 +507,7 @@ pub const Parser = struct {
         const name = (try self.expect_kind(.identifier)).text;
         try self.expect_punct(.equals);
         const num_tok = try self.expect_kind(.integer);
-        const number: i32 = @intCast(try parse_int(num_tok.text));
+        const number: i32 = try self.parse_field_number(num_tok);
 
         var options: []ast.FieldOption = &.{};
         if ((try self.lexer.peek()).kind == .open_bracket) {
@@ -571,7 +570,7 @@ pub const Parser = struct {
 
     fn parse_single_range(self: *Parser) !ast.ReservedRange {
         const start_tok = try self.expect_kind(.integer);
-        const start: i32 = @intCast(try parse_int(start_tok.text));
+        const start: i32 = try self.parse_field_number(start_tok);
 
         const next = try self.lexer.peek();
         if (next.kind == .identifier and std.mem.eql(u8, next.text, "to")) {
@@ -582,7 +581,7 @@ pub const Parser = struct {
                 return .{ .start = start, .end = 536870911 }; // 2^29 - 1
             }
             const end_num_tok = try self.expect_kind(.integer);
-            return .{ .start = start, .end = @intCast(try parse_int(end_num_tok.text)) };
+            return .{ .start = start, .end = try self.parse_field_number(end_num_tok) };
         }
 
         return .{ .start = start, .end = start };
@@ -593,32 +592,24 @@ pub const Parser = struct {
 
         var ext_ranges: std.ArrayList(ast.ExtensionRange) = .empty;
 
-        // Parse first range
+        // Parse first range and append it once
         const first = try self.parse_single_range();
-        var options: []ast.FieldOption = &.{};
+        try ext_ranges.append(self.allocator, .{ .start = first.start, .end = first.end, .options = &.{} });
 
-        // Check for more ranges
+        // Parse additional comma-separated ranges
         while ((try self.lexer.peek()).kind == .comma) {
             _ = try self.lexer.next();
             const r = try self.parse_single_range();
-            try ext_ranges.append(self.allocator, .{ .start = first.start, .end = first.end, .options = &.{} });
-            // Actually we need to rewrite: collect all ranges first, then options
             try ext_ranges.append(self.allocator, .{ .start = r.start, .end = r.end, .options = &.{} });
         }
 
         // Check for field options
+        var options: []ast.FieldOption = &.{};
         if ((try self.lexer.peek()).kind == .open_bracket) {
             options = try self.parse_field_options();
         }
 
         try self.expect_punct(.semicolon);
-
-        // If we didn't have multiple ranges, just return the single one
-        if (ext_ranges.items.len == 0) {
-            var result: std.ArrayList(ast.ExtensionRange) = .empty;
-            try result.append(self.allocator, .{ .start = first.start, .end = first.end, .options = options });
-            return try result.toOwnedSlice(self.allocator);
-        }
 
         // Apply options to all ranges
         for (ext_ranges.items) |*r| r.options = options;
@@ -656,7 +647,7 @@ pub const Parser = struct {
             }
             if (tok.kind == .identifier and is_label(tok.text)) {
                 if (try self.is_group_coming()) {
-                    const label = label_from_text(tok.text, syntax);
+                    const label = try self.validated_label(tok.text, syntax, tok.location);
                     _ = try self.lexer.next();
                     try groups.append(self.allocator, try self.parse_group_def(label));
                     continue;
@@ -681,7 +672,7 @@ pub const Parser = struct {
         const name = (try self.expect_kind(.identifier)).text;
         try self.expect_punct(.equals);
         const num_tok = try self.expect_kind(.integer);
-        const number: i32 = @intCast(try parse_int(num_tok.text));
+        const number: i32 = try self.parse_field_number(num_tok);
         try self.expect_punct(.open_brace);
 
         var fields: std.ArrayList(ast.Field) = .empty;
@@ -1077,6 +1068,51 @@ pub const Parser = struct {
         }
     }
 
+    fn parse_field_number(self: *Parser, tok: lexer_mod.Token) !i32 {
+        const num = parse_int(tok.text) catch {
+            try self.add_error(tok.location, "invalid integer literal");
+            return error.ParseFailed;
+        };
+        if (num < 1 or num > 536_870_911) {
+            try self.add_error(tok.location, "field number out of valid range (1 to 536870911)");
+            return error.ParseFailed;
+        }
+        return @intCast(num);
+    }
+
+    fn parse_enum_number(self: *Parser, tok: lexer_mod.Token, negative: bool) !i32 {
+        const num = parse_int(tok.text) catch {
+            try self.add_error(tok.location, "invalid integer literal");
+            return error.ParseFailed;
+        };
+        if (negative) {
+            if (num > 2_147_483_648) {
+                try self.add_error(tok.location, "enum value out of valid range");
+                return error.ParseFailed;
+            }
+            return -@as(i32, @intCast(num));
+        } else {
+            if (num > 2_147_483_647) {
+                try self.add_error(tok.location, "enum value out of valid range");
+                return error.ParseFailed;
+            }
+            return @intCast(num);
+        }
+    }
+
+    fn validated_label(self: *Parser, text: []const u8, syntax: ast.Syntax, location: ast.SourceLocation) !ast.FieldLabel {
+        if (std.mem.eql(u8, text, "required")) {
+            if (syntax == .proto3) {
+                try self.add_error(location, "'required' is not allowed in proto3");
+                return .optional;
+            }
+            return .required;
+        }
+        if (std.mem.eql(u8, text, "optional")) return .optional;
+        if (std.mem.eql(u8, text, "repeated")) return .repeated;
+        return .implicit;
+    }
+
     fn add_error(self: *Parser, location: ast.SourceLocation, message: []const u8) !void {
         try self.diagnostics.append(self.allocator, .{
             .location = location,
@@ -1107,6 +1143,7 @@ pub const Parser = struct {
         }
     }
 
+    /// Errors surfaced by the parser and delegated lexer operations.
     pub const Error = error{
         ParseFailed,
         InvalidCharacter,
@@ -1125,14 +1162,6 @@ fn is_label(text: []const u8) bool {
     return std.mem.eql(u8, text, "optional") or
         std.mem.eql(u8, text, "required") or
         std.mem.eql(u8, text, "repeated");
-}
-
-fn label_from_text(text: []const u8, syntax: ast.Syntax) ast.FieldLabel {
-    _ = syntax;
-    if (std.mem.eql(u8, text, "required")) return .required;
-    if (std.mem.eql(u8, text, "optional")) return .optional;
-    if (std.mem.eql(u8, text, "repeated")) return .repeated;
-    return .implicit;
 }
 
 fn parse_int(text: []const u8) !u64 {
@@ -1443,6 +1472,19 @@ test "Parser: extensions (proto2)" {
     try testing.expectEqual(@as(i32, 199), file.messages[0].extension_ranges[0].end);
 }
 
+test "Parser: extensions comma-separated (proto2)" {
+    const file = try parse_test(
+        \\syntax = "proto2";
+        \\message Msg {
+        \\  extensions 1, 2, 3;
+        \\}
+    );
+    try testing.expectEqual(@as(usize, 3), file.messages[0].extension_ranges.len);
+    try testing.expectEqual(@as(i32, 1), file.messages[0].extension_ranges[0].start);
+    try testing.expectEqual(@as(i32, 2), file.messages[0].extension_ranges[1].start);
+    try testing.expectEqual(@as(i32, 3), file.messages[0].extension_ranges[2].start);
+}
+
 test "Parser: extend block (proto2)" {
     const file = try parse_test(
         \\syntax = "proto2";
@@ -1625,6 +1667,29 @@ test "Parser: negative integer constant" {
 test "Parser: float constant" {
     const file = try parse_test("syntax = \"proto3\"; option foo = 3.14;");
     try testing.expectEqual(@as(f64, 3.14), file.options[0].value.float_value);
+}
+
+// ── Proto3 required validation ────────────────────────────────────────
+
+test "Parser: proto3 required emits error and degrades to optional" {
+    var diags: DiagnosticList = .empty;
+    const file = try parse_test_with_diags(
+        \\syntax = "proto3";
+        \\message Msg { required int32 id = 1; }
+    , &diags);
+    try testing.expectEqual(1, diags.items.len);
+    try testing.expectEqualStrings("'required' is not allowed in proto3", diags.items[0].message);
+    try testing.expectEqual(ast.FieldLabel.optional, file.messages[0].fields[0].label);
+}
+
+test "Parser: proto2 required accepted without error" {
+    var diags: DiagnosticList = .empty;
+    const file = try parse_test_with_diags(
+        \\syntax = "proto2";
+        \\message Msg { required int32 id = 1; }
+    , &diags);
+    try testing.expectEqual(0, diags.items.len);
+    try testing.expectEqual(ast.FieldLabel.required, file.messages[0].fields[0].label);
 }
 
 test "fuzz: Parser handles arbitrary input" {

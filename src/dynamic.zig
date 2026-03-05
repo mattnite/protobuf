@@ -331,7 +331,17 @@ pub const DynamicMessage = struct {
                     const key_val = DynamicValue{ .int64_val = entry.key_ptr.* };
                     const entry_size = calcMapEntrySize(mfd, key_val, entry.value_ptr.*);
                     try mw.write_len_prefix(field_num, entry_size);
-                    try message.MessageWriter.init(writer).write_varint_field(1, @bitCast(entry.key_ptr.*));
+                    // Encode key with proper wire format based on key_type
+                    const key_mw = message.MessageWriter.init(writer);
+                    switch (mfd.entry.key_type) {
+                        .sint32 => try key_mw.write_varint_field(1, encoding.zigzag_encode(@as(i32, @truncate(entry.key_ptr.*)))),
+                        .sint64 => try key_mw.write_varint_field(1, encoding.zigzag_encode_64(entry.key_ptr.*)),
+                        .fixed32 => try key_mw.write_i32_field(1, @truncate(@as(u64, @bitCast(entry.key_ptr.*)))),
+                        .fixed64 => try key_mw.write_i64_field(1, @as(u64, @bitCast(entry.key_ptr.*))),
+                        .sfixed32 => try key_mw.write_i32_field(1, @truncate(@as(u64, @bitCast(entry.key_ptr.*)))),
+                        .sfixed64 => try key_mw.write_i64_field(1, @as(u64, @bitCast(entry.key_ptr.*))),
+                        else => try key_mw.write_varint_field(1, @bitCast(entry.key_ptr.*)),
+                    }
                     try encodeMapValue(mfd.entry.value_type, 2, entry.value_ptr.*, writer);
                 }
             },
@@ -348,6 +358,12 @@ pub const DynamicMessage = struct {
             .int64 => try mw.write_varint_field(field_num, @bitCast(val.int64_val)),
             .uint32 => try mw.write_varint_field(field_num, @as(u64, val.uint32_val)),
             .uint64 => try mw.write_varint_field(field_num, val.uint64_val),
+            .sint32 => try mw.write_varint_field(field_num, encoding.zigzag_encode(val.int32_val)),
+            .sint64 => try mw.write_varint_field(field_num, encoding.zigzag_encode_64(val.int64_val)),
+            .fixed32 => try mw.write_i32_field(field_num, @bitCast(val.uint32_val)),
+            .fixed64 => try mw.write_i64_field(field_num, val.uint64_val),
+            .sfixed32 => try mw.write_i32_field(field_num, @bitCast(val.int32_val)),
+            .sfixed64 => try mw.write_i64_field(field_num, @bitCast(val.int64_val)),
             .bool => try mw.write_varint_field(field_num, @intFromBool(val.bool_val)),
             .double => try mw.write_i64_field(field_num, @bitCast(val.double_val)),
             .float => try mw.write_i32_field(field_num, @bitCast(val.float_val)),
@@ -358,7 +374,7 @@ pub const DynamicMessage = struct {
                 try mw.write_len_prefix(field_num, sub_size);
                 try sub_msg.encode(writer);
             },
-            else => {},
+            .group => {},
         }
     }
 
@@ -431,19 +447,17 @@ pub const DynamicMessage = struct {
     fn calcMapEntrySize(mfd: *const descriptor.MapFieldDescriptor, key: DynamicValue, val: DynamicValue) usize {
         var size: usize = 0;
         // key = field 1
+        // Note: map_int stores all integer keys as i64, so we extract from int64_val
+        // for non-string key types.
         switch (mfd.entry.key_type) {
             .string => size += message.len_field_size(1, key.string_val.len),
-            .int32 => size += message.varint_field_size(1, @bitCast(@as(i64, key.int32_val))),
-            .int64 => size += message.varint_field_size(1, @bitCast(key.int64_val)),
-            .uint32 => size += message.varint_field_size(1, @as(u64, key.uint32_val)),
-            .uint64 => size += message.varint_field_size(1, key.uint64_val),
+            .int32, .int64 => size += message.varint_field_size(1, @bitCast(key.int64_val)),
+            .uint32, .uint64 => size += message.varint_field_size(1, @as(u64, @bitCast(key.int64_val))),
             .bool => size += message.varint_field_size(1, @intFromBool(key.bool_val)),
-            .sint32 => size += message.varint_field_size(1, encoding.zigzag_encode(key.int32_val)),
+            .sint32 => size += message.varint_field_size(1, encoding.zigzag_encode(@as(i32, @truncate(key.int64_val)))),
             .sint64 => size += message.varint_field_size(1, encoding.zigzag_encode_64(key.int64_val)),
-            .fixed32 => size += message.i32_field_size(1),
-            .fixed64 => size += message.i64_field_size(1),
-            .sfixed32 => size += message.i32_field_size(1),
-            .sfixed64 => size += message.i64_field_size(1),
+            .fixed32, .sfixed32 => size += message.i32_field_size(1),
+            .fixed64, .sfixed64 => size += message.i64_field_size(1),
             else => {},
         }
         // value = field 2
@@ -455,11 +469,20 @@ pub const DynamicMessage = struct {
 
     /// Deserialize a DynamicMessage from protobuf binary wire format bytes
     pub fn decode(allocator: std.mem.Allocator, desc: *const descriptor.MessageDescriptor, bytes: []const u8) (std.mem.Allocator.Error || message.Error || Error)!DynamicMessage {
-        return decode_depth(allocator, desc, bytes, message.default_max_decode_depth);
+        return decode_impl(allocator, desc, bytes, message.default_max_decode_depth, null);
+    }
+
+    /// Deserialize a DynamicMessage with a TypeRegistry for cross-file type resolution.
+    pub fn decode_with_registry(allocator: std.mem.Allocator, desc: *const descriptor.MessageDescriptor, bytes: []const u8, registry: *const descriptor.TypeRegistry) (std.mem.Allocator.Error || message.Error || Error)!DynamicMessage {
+        return decode_impl(allocator, desc, bytes, message.default_max_decode_depth, registry);
     }
 
     /// Deserialize a DynamicMessage with an explicit recursion depth limit
     pub fn decode_depth(allocator: std.mem.Allocator, desc: *const descriptor.MessageDescriptor, bytes: []const u8, depth_remaining: usize) (std.mem.Allocator.Error || message.Error || Error)!DynamicMessage {
+        return decode_impl(allocator, desc, bytes, depth_remaining, null);
+    }
+
+    fn decode_impl(allocator: std.mem.Allocator, desc: *const descriptor.MessageDescriptor, bytes: []const u8, depth_remaining: usize, registry: ?*const descriptor.TypeRegistry) (std.mem.Allocator.Error || message.Error || Error)!DynamicMessage {
         if (depth_remaining == 0) return error.RecursionLimitExceeded;
         var msg = DynamicMessage.init(allocator, desc);
         errdefer msg.deinit();
@@ -468,13 +491,13 @@ pub const DynamicMessage = struct {
         while (try iter.next()) |field| {
             // Check if it's a map field
             if (findMapFieldByNumber(desc, field.number)) |mfd| {
-                try decodeMapEntry(&msg, mfd, field, depth_remaining);
+                try decodeMapEntry(&msg, mfd, field, depth_remaining, registry);
                 continue;
             }
 
             // Regular field
             const fd = findFieldByNumber(desc, field.number) orelse continue;
-            try decodeFieldValue(&msg, fd, field, depth_remaining);
+            try decodeFieldValue(&msg, fd, field, depth_remaining, registry);
         }
 
         return msg;
@@ -487,8 +510,8 @@ pub const DynamicMessage = struct {
         return null;
     }
 
-    fn decodeFieldValue(msg: *DynamicMessage, fd: *const descriptor.FieldDescriptor, field: message.Field, depth_remaining: usize) !void {
-        const val = try wireToValue(msg.allocator, fd.field_type, field, fd, msg.desc, depth_remaining);
+    fn decodeFieldValue(msg: *DynamicMessage, fd: *const descriptor.FieldDescriptor, field: message.Field, depth_remaining: usize, registry: ?*const descriptor.TypeRegistry) !void {
+        const val = try wireToValue(msg.allocator, fd.field_type, field, fd, msg.desc, depth_remaining, registry);
 
         if (fd.label == .repeated) {
             try msg.appendOwned(fd.number, val);
@@ -497,7 +520,7 @@ pub const DynamicMessage = struct {
         }
     }
 
-    fn wireToValue(allocator: std.mem.Allocator, ft: descriptor.FieldType, field: message.Field, fd: *const descriptor.FieldDescriptor, desc: *const descriptor.MessageDescriptor, depth_remaining: usize) !DynamicValue {
+    fn wireToValue(allocator: std.mem.Allocator, ft: descriptor.FieldType, field: message.Field, fd: *const descriptor.FieldDescriptor, desc: *const descriptor.MessageDescriptor, depth_remaining: usize, registry: ?*const descriptor.TypeRegistry) !DynamicValue {
         _ = fd;
         return switch (ft) {
             .double => .{ .double_val = @bitCast(field.value.i64) },
@@ -524,16 +547,31 @@ pub const DynamicMessage = struct {
             },
             .enum_type => .{ .enum_val = @bitCast(@as(u32, @truncate(field.value.varint))) },
             .message => blk: {
-                // Find the nested message descriptor by type_name
+                // Find the nested message descriptor by type_name, then fall back to registry
                 const sub_desc = findNestedDesc(desc, field.number) orelse
+                    findDescInRegistry(desc, field.number, registry) orelse
                     return error.UnknownField;
                 const sub_msg = try allocator.create(DynamicMessage);
                 errdefer allocator.destroy(sub_msg);
-                sub_msg.* = try decode_depth(allocator, sub_desc, field.value.len, depth_remaining - 1);
+                sub_msg.* = try decode_impl(allocator, sub_desc, field.value.len, depth_remaining - 1, registry);
                 break :blk .{ .message_val = sub_msg };
             },
             .group => .{ .null_val = {} },
         };
+    }
+
+    /// Look up a field's message type in the TypeRegistry by its type_name.
+    fn findDescInRegistry(desc: *const descriptor.MessageDescriptor, field_number: u29, registry: ?*const descriptor.TypeRegistry) ?*const descriptor.MessageDescriptor {
+        const reg = registry orelse return null;
+        for (desc.fields) |*f| {
+            if (f.number == @as(i32, field_number)) {
+                if (f.type_name) |type_name| {
+                    return reg.findMessage(type_name);
+                }
+                return null;
+            }
+        }
+        return null;
     }
 
     fn findNestedDesc(desc: *const descriptor.MessageDescriptor, field_number: u29) ?*const descriptor.MessageDescriptor {
@@ -541,14 +579,21 @@ pub const DynamicMessage = struct {
         for (desc.fields) |*f| {
             if (f.number == @as(i32, field_number)) {
                 if (f.type_name) |type_name| {
-                    // Search nested messages
+                    // Search nested messages by short name and full name
                     for (desc.nested_messages) |*nm| {
                         if (std.mem.eql(u8, nm.name, type_name) or std.mem.eql(u8, nm.full_name, type_name)) {
                             return nm;
                         }
                     }
-                    // Not found in nested — could be a top-level message
-                    // For now return null (would need a registry for cross-references)
+                    // Also try stripping leading dot for absolute references (e.g. ".pkg.Msg")
+                    const stripped = if (type_name.len > 0 and type_name[0] == '.') type_name[1..] else type_name;
+                    if (stripped.ptr != type_name.ptr or stripped.len != type_name.len) {
+                        for (desc.nested_messages) |*nm| {
+                            if (std.mem.eql(u8, nm.full_name, stripped)) {
+                                return nm;
+                            }
+                        }
+                    }
                     return null;
                 }
                 return null;
@@ -557,7 +602,7 @@ pub const DynamicMessage = struct {
         return null;
     }
 
-    fn decodeMapEntry(msg: *DynamicMessage, mfd: *const descriptor.MapFieldDescriptor, field: message.Field, depth_remaining: usize) !void {
+    fn decodeMapEntry(msg: *DynamicMessage, mfd: *const descriptor.MapFieldDescriptor, field: message.Field, depth_remaining: usize, registry: ?*const descriptor.TypeRegistry) !void {
         // Map entries are encoded as length-delimited submessages with field 1 = key, field 2 = value
         var iter = message.FieldIterator{ .data = field.value.len };
         var key_val: ?DynamicValue = null;
@@ -567,7 +612,7 @@ pub const DynamicMessage = struct {
             if (sub_field.number == 1) {
                 key_val = try wireToMapKeyValue(msg.allocator, mfd.entry.key_type, sub_field);
             } else if (sub_field.number == 2) {
-                value_val = try wireToMapValue(msg.allocator, mfd.entry.value_type, sub_field, mfd, msg.desc, depth_remaining);
+                value_val = try wireToMapValue(msg.allocator, mfd.entry.value_type, sub_field, mfd, msg.desc, depth_remaining, registry);
             }
         }
 
@@ -599,9 +644,7 @@ pub const DynamicMessage = struct {
         };
     }
 
-    fn wireToMapValue(allocator: std.mem.Allocator, ft: descriptor.FieldType, field: message.Field, mfd: *const descriptor.MapFieldDescriptor, parent_desc: *const descriptor.MessageDescriptor, depth_remaining: usize) !DynamicValue {
-        _ = mfd;
-        _ = parent_desc;
+    fn wireToMapValue(allocator: std.mem.Allocator, ft: descriptor.FieldType, field: message.Field, mfd: *const descriptor.MapFieldDescriptor, parent_desc: *const descriptor.MessageDescriptor, depth_remaining: usize, registry: ?*const descriptor.TypeRegistry) !DynamicValue {
         return switch (ft) {
             .string => blk: {
                 try message.validate_utf8(field.value.len);
@@ -616,16 +659,42 @@ pub const DynamicMessage = struct {
             .int64 => .{ .int64_val = @bitCast(field.value.varint) },
             .uint32 => .{ .uint32_val = @truncate(field.value.varint) },
             .uint64 => .{ .uint64_val = field.value.varint },
+            .sint32 => .{ .int32_val = encoding.zigzag_decode(@truncate(field.value.varint)) },
+            .sint64 => .{ .int64_val = encoding.zigzag_decode_64(field.value.varint) },
             .bool => .{ .bool_val = field.value.varint != 0 },
             .double => .{ .double_val = @bitCast(field.value.i64) },
             .float => .{ .float_val = @bitCast(field.value.i32) },
+            .fixed32 => .{ .uint32_val = field.value.i32 },
+            .fixed64 => .{ .uint64_val = field.value.i64 },
+            .sfixed32 => .{ .int32_val = @bitCast(field.value.i32) },
+            .sfixed64 => .{ .int64_val = @bitCast(field.value.i64) },
             .enum_type => .{ .enum_val = @bitCast(@as(u32, @truncate(field.value.varint))) },
             .message => blk: {
-                // Without a full registry, we can't resolve cross-references here
-                _ = depth_remaining;
+                if (depth_remaining == 0) return error.RecursionLimitExceeded;
+                // Resolve the value type from the map entry's value_type_name
+                if (mfd.entry.value_type_name) |type_name| {
+                    // Search nested messages in the parent descriptor
+                    for (parent_desc.nested_messages) |*nm| {
+                        if (std.mem.eql(u8, nm.name, type_name) or std.mem.eql(u8, nm.full_name, type_name)) {
+                            const sub_msg = try allocator.create(DynamicMessage);
+                            errdefer allocator.destroy(sub_msg);
+                            sub_msg.* = try decode_impl(allocator, nm, field.value.len, depth_remaining - 1, registry);
+                            break :blk .{ .message_val = sub_msg };
+                        }
+                    }
+                    // Fall back to the type registry for cross-file resolution
+                    if (registry) |reg| {
+                        if (reg.findMessage(type_name)) |resolved_desc| {
+                            const sub_msg = try allocator.create(DynamicMessage);
+                            errdefer allocator.destroy(sub_msg);
+                            sub_msg.* = try decode_impl(allocator, resolved_desc, field.value.len, depth_remaining - 1, registry);
+                            break :blk .{ .message_val = sub_msg };
+                        }
+                    }
+                }
                 break :blk .{ .null_val = {} };
             },
-            else => .{ .null_val = {} },
+            .group => .{ .null_val = {} },
         };
     }
 };
@@ -1057,4 +1126,211 @@ test "DynamicMessage: decode allows invalid UTF-8 in bytes field" {
     var decoded = try DynamicMessage.decode(testing.allocator, &desc, encoded);
     defer decoded.deinit();
     try testing.expectEqualSlices(u8, &[_]u8{ 0x80, 0xFF }, decoded.get(1).?.singular.bytes_val);
+}
+
+test "DynamicMessage: map with sint32 key round-trip" {
+    const desc = descriptor.MessageDescriptor{
+        .name = "Test",
+        .full_name = "Test",
+        .fields = &.{},
+        .maps = &.{
+            .{ .name = "m", .number = 1, .entry = .{ .key_type = .sint32, .value_type = .string } },
+        },
+    };
+    var msg = DynamicMessage.init(testing.allocator, &desc);
+    defer msg.deinit();
+
+    try msg.putMap(1, .{ .int32_val = -7 }, .{ .string_val = "neg" });
+    try msg.putMap(1, .{ .int32_val = 42 }, .{ .string_val = "pos" });
+
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try msg.encode(&writer);
+    const encoded = writer.buffered();
+
+    var decoded = try DynamicMessage.decode(testing.allocator, &desc, encoded);
+    defer decoded.deinit();
+
+    const map_storage = decoded.get(1).?;
+    try testing.expectEqual(@as(usize, 2), map_storage.map_int.count());
+    try testing.expectEqualStrings("neg", map_storage.map_int.get(-7).?.string_val);
+    try testing.expectEqualStrings("pos", map_storage.map_int.get(42).?.string_val);
+}
+
+test "DynamicMessage: map with message value round-trip" {
+    const inner_desc = descriptor.MessageDescriptor{
+        .name = "Val",
+        .full_name = "Val",
+        .fields = &.{
+            .{ .name = "x", .number = 1, .field_type = .int32, .label = .implicit },
+        },
+    };
+    const desc = descriptor.MessageDescriptor{
+        .name = "Test",
+        .full_name = "Test",
+        .fields = &.{},
+        .nested_messages = &.{inner_desc},
+        .maps = &.{
+            .{ .name = "m", .number = 1, .entry = .{ .key_type = .string, .value_type = .message, .value_type_name = "Val" } },
+        },
+    };
+
+    // Build a message with a map<string, Val> entry
+    var val_msg = try testing.allocator.create(DynamicMessage);
+    val_msg.* = DynamicMessage.init(testing.allocator, &inner_desc);
+    try val_msg.set(1, .{ .int32_val = 99 });
+
+    var msg = DynamicMessage.init(testing.allocator, &desc);
+    defer msg.deinit();
+    try msg.putMap(1, .{ .string_val = "key1" }, .{ .message_val = val_msg });
+
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try msg.encode(&writer);
+    const encoded = writer.buffered();
+
+    var decoded = try DynamicMessage.decode(testing.allocator, &desc, encoded);
+    defer decoded.deinit();
+
+    const map_storage = decoded.get(1).?;
+    try testing.expectEqual(@as(usize, 1), map_storage.map_str.count());
+    const decoded_val = map_storage.map_str.get("key1").?.message_val;
+    try testing.expectEqual(@as(i32, 99), decoded_val.get(1).?.singular.int32_val);
+}
+
+test "DynamicMessage: cross-file type resolution with TypeRegistry" {
+    // Simulate two .proto files:
+    //   address.proto: message Address { string city = 1; }
+    //   person.proto:  message Person { string name = 1; Address addr = 2; }
+    // The Address type lives in a different file, so it won't be in Person's nested_messages.
+
+    const address_desc = descriptor.MessageDescriptor{
+        .name = "Address",
+        .full_name = "example.Address",
+        .fields = &.{
+            .{ .name = "city", .number = 1, .field_type = .string, .label = .implicit },
+        },
+    };
+    const person_desc = descriptor.MessageDescriptor{
+        .name = "Person",
+        .full_name = "example.Person",
+        .fields = &.{
+            .{ .name = "name", .number = 1, .field_type = .string, .label = .implicit },
+            .{ .name = "addr", .number = 2, .field_type = .message, .label = .implicit, .type_name = "example.Address" },
+        },
+        // Note: no nested_messages — Address is in a different file.
+    };
+
+    // Build a TypeRegistry with the Address descriptor.
+    var reg = descriptor.TypeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    try reg.registerMessage(&address_desc);
+
+    // Encode: Person { name: "Alice", addr: Address { city: "Berlin" } }
+    var addr_msg = try testing.allocator.create(DynamicMessage);
+    addr_msg.* = DynamicMessage.init(testing.allocator, &address_desc);
+    try addr_msg.set(1, .{ .string_val = "Berlin" });
+
+    var person_msg = DynamicMessage.init(testing.allocator, &person_desc);
+    defer person_msg.deinit();
+    try person_msg.set(1, .{ .string_val = "Alice" });
+    try person_msg.set(2, .{ .message_val = addr_msg });
+
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try person_msg.encode(&writer);
+    const encoded = writer.buffered();
+
+    // Without registry: decode should fail because Address can't be resolved.
+    const no_reg_result = DynamicMessage.decode(testing.allocator, &person_desc, encoded);
+    try testing.expectError(error.UnknownField, no_reg_result);
+
+    // With registry: decode should succeed and resolve Address from the registry.
+    var decoded = try DynamicMessage.decode_with_registry(testing.allocator, &person_desc, encoded, &reg);
+    defer decoded.deinit();
+
+    try testing.expectEqualStrings("Alice", decoded.get(1).?.singular.string_val);
+    const decoded_addr = decoded.get(2).?.singular.message_val;
+    try testing.expectEqualStrings("Berlin", decoded_addr.get(1).?.singular.string_val);
+}
+
+test "DynamicMessage: cross-file map value with TypeRegistry" {
+    // map<string, ExternalMsg> where ExternalMsg is in a different file.
+    const ext_desc = descriptor.MessageDescriptor{
+        .name = "ExtVal",
+        .full_name = "other.ExtVal",
+        .fields = &.{
+            .{ .name = "score", .number = 1, .field_type = .int32, .label = .implicit },
+        },
+    };
+    const parent_desc = descriptor.MessageDescriptor{
+        .name = "Parent",
+        .full_name = "pkg.Parent",
+        .fields = &.{},
+        .maps = &.{
+            .{ .name = "data", .number = 1, .entry = .{ .key_type = .string, .value_type = .message, .value_type_name = "other.ExtVal" } },
+        },
+    };
+
+    var reg = descriptor.TypeRegistry.init(testing.allocator);
+    defer reg.deinit();
+    try reg.registerMessage(&ext_desc);
+
+    // Encode a message with a map entry: "k1" → ExtVal{score: 42}
+    var val_msg = try testing.allocator.create(DynamicMessage);
+    val_msg.* = DynamicMessage.init(testing.allocator, &ext_desc);
+    try val_msg.set(1, .{ .int32_val = 42 });
+
+    var msg = DynamicMessage.init(testing.allocator, &parent_desc);
+    defer msg.deinit();
+    try msg.putMap(1, .{ .string_val = "k1" }, .{ .message_val = val_msg });
+
+    var buf: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try msg.encode(&writer);
+    const encoded = writer.buffered();
+
+    // Without registry: map value message can't be resolved, returns null_val.
+    var decoded_no_reg = try DynamicMessage.decode(testing.allocator, &parent_desc, encoded);
+    defer decoded_no_reg.deinit();
+    const no_reg_val = decoded_no_reg.get(1).?.map_str.get("k1").?;
+    try testing.expectEqual(DynamicValue.null_val, no_reg_val);
+
+    // With registry: map value message should be resolved.
+    var decoded = try DynamicMessage.decode_with_registry(testing.allocator, &parent_desc, encoded, &reg);
+    defer decoded.deinit();
+    const resolved_val = decoded.get(1).?.map_str.get("k1").?.message_val;
+    try testing.expectEqual(@as(i32, 42), resolved_val.get(1).?.singular.int32_val);
+}
+
+test "fuzz: DynamicMessage.decode does not crash on arbitrary input" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, input: []const u8) anyerror!void {
+            // Descriptor with a mix of scalar field types to exercise many decode paths
+            const desc = descriptor.MessageDescriptor{
+                .name = "FuzzMsg",
+                .full_name = "FuzzMsg",
+                .fields = &.{
+                    .{ .name = "f_int32", .number = 1, .field_type = .int32, .label = .implicit },
+                    .{ .name = "f_int64", .number = 2, .field_type = .int64, .label = .implicit },
+                    .{ .name = "f_uint32", .number = 3, .field_type = .uint32, .label = .implicit },
+                    .{ .name = "f_uint64", .number = 4, .field_type = .uint64, .label = .implicit },
+                    .{ .name = "f_sint32", .number = 5, .field_type = .sint32, .label = .implicit },
+                    .{ .name = "f_sint64", .number = 6, .field_type = .sint64, .label = .implicit },
+                    .{ .name = "f_bool", .number = 7, .field_type = .bool, .label = .implicit },
+                    .{ .name = "f_fixed32", .number = 8, .field_type = .fixed32, .label = .implicit },
+                    .{ .name = "f_fixed64", .number = 9, .field_type = .fixed64, .label = .implicit },
+                    .{ .name = "f_sfixed32", .number = 10, .field_type = .sfixed32, .label = .implicit },
+                    .{ .name = "f_sfixed64", .number = 11, .field_type = .sfixed64, .label = .implicit },
+                    .{ .name = "f_float", .number = 12, .field_type = .float, .label = .implicit },
+                    .{ .name = "f_double", .number = 13, .field_type = .double, .label = .implicit },
+                    .{ .name = "f_string", .number = 14, .field_type = .string, .label = .implicit },
+                    .{ .name = "f_bytes", .number = 15, .field_type = .bytes, .label = .implicit },
+                    .{ .name = "f_repeated", .number = 16, .field_type = .int32, .label = .repeated },
+                },
+            };
+            var msg = DynamicMessage.decode(testing.allocator, &desc, input) catch return;
+            msg.deinit();
+        }
+    }.run, .{});
 }

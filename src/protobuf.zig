@@ -16,10 +16,14 @@ pub const json = @import("json.zig");
 pub const text_format = @import("text_format.zig");
 /// Runtime descriptor types for protobuf reflection
 pub const descriptor = @import("descriptor.zig");
+/// Cross-file type name → descriptor registry for dynamic message decoding
+pub const TypeRegistry = descriptor.TypeRegistry;
 /// Dynamic message encode/decode without generated code, driven by descriptors
 pub const dynamic = @import("dynamic.zig");
 /// Protoc plugin support for use as protoc-gen-zig
 pub const plugin = @import("plugin.zig");
+/// Special JSON mappings for Google protobuf well-known types (Timestamp, Duration, wrappers, etc.)
+pub const well_known_types = @import("well_known_types.zig");
 
 test {
     _ = encoding;
@@ -32,4 +36,5 @@ test {
     _ = descriptor;
     _ = dynamic;
     _ = plugin;
+    _ = well_known_types;
 }

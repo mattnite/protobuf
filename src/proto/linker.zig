@@ -9,11 +9,19 @@ const parser_mod = @import("parser.zig");
 /// Set of linked .proto files with resolved cross-file references
 pub const ResolvedFileSet = struct {
     files: []ResolvedFile,
+    /// Files loaded via imports (e.g. well-known types) that need codegen
+    imported_files: []ImportedFile,
 
     /// A single resolved .proto file within the file set
     pub const ResolvedFile = struct {
         source: ast.File,
         type_registry: std.StringHashMap(TypeInfo),
+    };
+
+    /// An imported file resolved during linking
+    pub const ImportedFile = struct {
+        path: []const u8,
+        source: ast.File,
     };
 
     /// Resolved type information for cross-file references
@@ -115,7 +123,20 @@ pub const Linker = struct {
             });
         }
 
-        return .{ .files = try result_files.toOwnedSlice(self.allocator) };
+        // Collect imported files for codegen
+        var imported: std.ArrayList(ResolvedFileSet.ImportedFile) = .empty;
+        var loaded_iter2 = self.loaded_files.iterator();
+        while (loaded_iter2.next()) |entry| {
+            try imported.append(self.allocator, .{
+                .path = entry.key_ptr.*,
+                .source = entry.value_ptr.*,
+            });
+        }
+
+        return .{
+            .files = try result_files.toOwnedSlice(self.allocator),
+            .imported_files = try imported.toOwnedSlice(self.allocator),
+        };
     }
 
     // ── Import Resolution ─────────────────────────────────────────────
@@ -317,6 +338,15 @@ pub const Linker = struct {
             }
         }
 
+        // Validate oneof constraints: fields in a oneof must not be repeated
+        for (msg.oneofs) |oneof| {
+            for (oneof.fields) |field| {
+                if (field.label == .repeated) {
+                    try self.add_error(field.location, "oneof field must not be repeated");
+                }
+            }
+        }
+
         // Resolve named type references
         const scope = try self.file_scope(file, msg.name);
         for (msg.fields) |field| {
@@ -337,13 +367,20 @@ pub const Linker = struct {
     }
 
     fn validate_enum(self: *Linker, e: ast.Enum, file: ast.File) LinkError!void {
-        _ = file;
         // Proto3: first enum value must be 0
-        if (e.values.len > 0 and e.values[0].number != 0) {
-            // Only for proto3, but we don't track syntax per-enum.
-            // Add a check that can be refined when we have syntax context.
-            // For now, we'll check all enums — the proto3 constraint.
+        if (file.syntax == .proto3 and e.values.len > 0 and e.values[0].number != 0) {
             try self.add_error(e.values[0].location, "first enum value must be 0 in proto3");
+        }
+
+        // Reject duplicate enum values unless allow_alias is true
+        if (!e.allow_alias) {
+            for (e.values, 0..) |val, i| {
+                for (e.values[i + 1 ..]) |other| {
+                    if (val.number == other.number) {
+                        try self.add_error(other.location, "duplicate enum value number; use allow_alias to allow");
+                    }
+                }
+            }
         }
     }
 
@@ -613,6 +650,28 @@ test "Linker: proto3 enum first value not zero" {
     try testing.expect(count_errors(&diags) > 0);
 }
 
+// ── Validation: proto2 enum may start at non-zero ────────────────────
+
+test "Linker: proto2 enum with non-zero first value is accepted" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var diags: parser_mod.DiagnosticList = .empty;
+    const file = try parse_source(arena,
+        \\syntax = "proto2";
+        \\enum Status {
+        \\  FIRST = 1;
+        \\}
+    , &diags);
+
+    var linker = Linker.init(arena, &diags, no_loader);
+    const files: [1]ast.File = .{file};
+    _ = try linker.link(&files);
+
+    try testing.expectEqual(count_errors(&diags), 0);
+}
+
 // ── Validation: unresolved type ───────────────────────────────────────
 
 test "Linker: unresolved type reference" {
@@ -726,4 +785,113 @@ test "Linker: type registry contains all types" {
     try testing.expect(reg.contains(".test.Outer.Inner"));
     try testing.expect(reg.contains(".test.Outer.Status"));
     try testing.expect(reg.contains(".test.TopEnum"));
+}
+
+// ── Validation: allow_alias enforcement ───────────────────────────────
+
+test "Linker: duplicate enum values rejected without allow_alias" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var diags: parser_mod.DiagnosticList = .empty;
+    const file = try parse_source(arena,
+        \\syntax = "proto3";
+        \\enum Bad {
+        \\  A = 0;
+        \\  B = 0;
+        \\}
+    , &diags);
+
+    var linker = Linker.init(arena, &diags, no_loader);
+    const files: [1]ast.File = .{file};
+    _ = try linker.link(&files);
+
+    try testing.expect(count_errors(&diags) > 0);
+}
+
+test "Linker: duplicate enum values accepted with allow_alias" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    var diags: parser_mod.DiagnosticList = .empty;
+    const file = try parse_source(arena,
+        \\syntax = "proto3";
+        \\enum Good {
+        \\  option allow_alias = true;
+        \\  A = 0;
+        \\  B = 0;
+        \\}
+    , &diags);
+
+    var linker = Linker.init(arena, &diags, no_loader);
+    const files: [1]ast.File = .{file};
+    _ = try linker.link(&files);
+
+    try testing.expectEqual(@as(usize, 0), count_errors(&diags));
+}
+
+// ── Validation: oneof fields must not be repeated ─────────────────────
+
+test "Linker: oneof field with repeated label rejected" {
+    var arena_impl = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_impl.deinit();
+    const arena = arena_impl.allocator();
+
+    // Build AST directly since the parser doesn't allow `repeated` in oneofs.
+    // This validates the linker catches it when ASTs are built programmatically.
+    const loc = ast.SourceLocation{ .file = "test.proto", .line = 1, .column = 1 };
+    var oneof_fields = [_]ast.Field{
+        .{
+            .name = "items",
+            .number = 1,
+            .label = .repeated,
+            .type_name = .{ .scalar = .int32 },
+            .options = &.{},
+            .location = loc,
+        },
+    };
+    var oneofs = [_]ast.Oneof{
+        .{
+            .name = "choice",
+            .fields = &oneof_fields,
+            .options = &.{},
+            .location = loc,
+        },
+    };
+    var messages = [_]ast.Message{
+        .{
+            .name = "Bad",
+            .fields = &.{},
+            .oneofs = &oneofs,
+            .nested_messages = &.{},
+            .nested_enums = &.{},
+            .maps = &.{},
+            .reserved_ranges = &.{},
+            .reserved_names = &.{},
+            .extension_ranges = &.{},
+            .extensions = &.{},
+            .groups = &.{},
+            .options = &.{},
+            .location = loc,
+        },
+    };
+    const file = ast.File{
+        .syntax = .proto3,
+        .package = null,
+        .imports = &.{},
+        .options = &.{},
+        .messages = &messages,
+        .enums = &.{},
+        .services = &.{},
+        .extensions = &.{},
+    };
+
+    var diags: parser_mod.DiagnosticList = .empty;
+    var linker = Linker.init(arena, &diags, no_loader);
+    const files: [1]ast.File = .{file};
+    _ = try linker.link(&files);
+
+    try testing.expect(count_errors(&diags) > 0);
 }

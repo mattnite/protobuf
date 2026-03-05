@@ -895,13 +895,26 @@ pub fn generate(allocator: std.mem.Allocator, request_bytes: []const u8) ![]cons
         try files_to_gen.put(allocator, f, {});
     }
 
+    // Collect global enum names from all proto files for cross-file enum resolution
+    var global_enum_names: std.ArrayListUnmanaged([]const u8) = .empty;
+    for (request.proto_file) |proto_file| {
+        const ast_file = try convert_file(allocator, proto_file);
+        for (ast_file.enums) |en| {
+            if (ast_file.package) |pkg| {
+                try global_enum_names.append(allocator, try std.fmt.allocPrint(allocator, "{s}.{s}", .{ pkg, en.name }));
+            } else {
+                try global_enum_names.append(allocator, en.name);
+            }
+        }
+    }
+
     // Process each requested file
     var response_files: std.ArrayListUnmanaged(ResponseFile) = .empty;
     for (request.proto_file) |proto_file| {
         if (files_to_gen.get(proto_file.name) == null) continue;
 
         const ast_file = try convert_file(allocator, proto_file);
-        const zig_source = try codegen.generate_file(allocator, ast_file, proto_file.name);
+        const zig_source = try codegen.generate_file(allocator, ast_file, proto_file.name, global_enum_names.items);
         const out_path = try codegen.package_to_path(allocator, ast_file.package, proto_file.name);
 
         try response_files.append(allocator, .{

@@ -65,3 +65,23 @@ jobs:
       - name: Validate Zig vectors with Go
         working-directory: compat/go
         run: go run ./cmd/validate
+
+  conformance-tests:
+    runs-on: x86_64-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: https://codeberg.org/mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build conformance runner
+        run: |
+          apt-get update && apt-get install -y curl cmake g++
+          git clone --depth=1 https://github.com/protocolbuffers/protobuf /tmp/protobuf
+          cmake -S /tmp/protobuf -B /tmp/protobuf/build -Dprotobuf_BUILD_CONFORMANCE=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/protobuf/build --target conformance_test_runner -j$(nproc)
+
+      - name: Run conformance tests
+        working-directory: conformance
+        run: zig build run -Dconformance-runner=/tmp/protobuf/build/conformance_test_runner

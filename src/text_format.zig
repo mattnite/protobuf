@@ -68,6 +68,9 @@ pub fn write_float(writer: *Writer, value: anytype) Error!void {
         } else {
             try writer.writeAll("inf");
         }
+    } else if (value == 0 and std.math.signbit(value)) {
+        // Negative zero: write explicitly so the sign is preserved
+        try writer.writeAll("-0");
     } else {
         try writer.print("{d}", .{value});
     }
@@ -83,6 +86,25 @@ pub fn write_enum_name(writer: *Writer, name: []const u8) Error!void {
     try writer.writeAll(name);
 }
 
+/// Write an enum value as its identifier name when known, or as an integer.
+/// This is required for proto2/closed-enum unknown values, which may be held
+/// as raw numeric enum payloads and do not have a tag name.
+pub fn write_enum_value(writer: *Writer, value: anytype) Error!void {
+    const T = @TypeOf(value);
+    const ti = @typeInfo(T);
+    if (ti != .@"enum") @compileError("write_enum_value expects an enum value");
+
+    const int_value = @intFromEnum(value);
+    inline for (ti.@"enum".fields) |field| {
+        if (field.value == int_value) {
+            try writer.writeAll(field.name);
+            return;
+        }
+    }
+
+    try writer.print("{d}", .{int_value});
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Text Format Scanner (Deserialization)
 // ══════════════════════════════════════════════════════════════════════
@@ -93,9 +115,13 @@ pub const TextError = error{
     UnexpectedEndOfInput,
     InvalidNumber,
     InvalidEscape,
+    InvalidUtf8,
     Overflow,
     OutOfMemory,
 };
+
+/// Complete error set for generated from_text_scanner_inner methods (TextError + recursion)
+pub const DecodeError = TextError || error{RecursionLimitExceeded};
 
 /// Tagged union of text format token types from the scanner
 pub const TextToken = union(enum) {
@@ -106,6 +132,12 @@ pub const TextToken = union(enum) {
     colon,
     open_brace,
     close_brace,
+    comma,
+    semicolon,
+    open_bracket,
+    close_bracket,
+    open_angle,
+    close_angle,
 };
 
 /// Pull-based tokenizer for protobuf text format input
@@ -198,9 +230,46 @@ pub const TextScanner = struct {
                 self.pos += 1;
                 return .close_brace;
             },
-            '"', '\'' => return try self.scan_string(),
+            ',' => {
+                self.pos += 1;
+                return .comma;
+            },
+            ';' => {
+                self.pos += 1;
+                return .semicolon;
+            },
+            '[' => {
+                self.pos += 1;
+                return .open_bracket;
+            },
+            ']' => {
+                self.pos += 1;
+                return .close_bracket;
+            },
+            '<' => {
+                self.pos += 1;
+                return .open_angle;
+            },
+            '>' => {
+                self.pos += 1;
+                return .close_angle;
+            },
+            '"', '\'' => return try self.scan_string_with_concat(),
+            '.' => return self.scan_number(), // no-leading-zero: .5
             else => {
-                if (c == '-' or (c >= '0' and c <= '9')) {
+                if (c == '-') {
+                    // Could be negative number or -.5 etc
+                    if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == '.') {
+                        return self.scan_number();
+                    }
+                    if (self.pos + 1 < self.source.len and self.source[self.pos + 1] >= '0' and self.source[self.pos + 1] <= '9') {
+                        return self.scan_number();
+                    }
+                    // Bare '-' followed by identifier (e.g., "-inf")
+                    // Don't consume, let it be handled as unexpected
+                    return self.scan_number();
+                }
+                if (c >= '0' and c <= '9') {
                     return self.scan_number();
                 }
                 if (is_ident_start(c)) {
@@ -227,13 +296,17 @@ pub const TextScanner = struct {
         }
     }
 
-    fn scan_string(self: *TextScanner) TextError!TextToken {
+    fn scan_single_string(self: *TextScanner) TextError![]const u8 {
         const quote = self.source[self.pos];
         self.pos += 1;
         const start = self.pos;
         var has_escapes = false;
 
         while (self.pos < self.source.len and self.source[self.pos] != quote) {
+            if (self.source[self.pos] == '\n') {
+                // Raw LF in string literal is a parse error
+                return TextError.InvalidEscape;
+            }
             if (self.source[self.pos] == '\\') {
                 has_escapes = true;
                 self.pos += 1; // skip backslash
@@ -245,6 +318,16 @@ pub const TextScanner = struct {
                     // Skip 2 hex digits
                     if (self.pos + 2 > self.source.len) return TextError.InvalidEscape;
                     self.pos += 2;
+                } else if (esc == 'U') {
+                    self.pos += 1; // skip 'U'
+                    // 8 hex digits
+                    if (self.pos + 8 > self.source.len) return TextError.InvalidEscape;
+                    self.pos += 8;
+                } else if (esc == 'u') {
+                    self.pos += 1; // skip 'u'
+                    // 4 hex digits
+                    if (self.pos + 4 > self.source.len) return TextError.InvalidEscape;
+                    self.pos += 4;
                 } else if (esc >= '0' and esc <= '7') {
                     // Octal: up to 3 digits
                     self.pos += 1;
@@ -267,15 +350,53 @@ pub const TextScanner = struct {
         self.pos += 1; // skip closing quote
 
         if (!has_escapes) {
-            return .{ .string_literal = self.source[start..end] };
+            return self.source[start..end];
         }
 
         // Need to resolve escapes
-        return .{ .string_literal = try self.resolve_escapes(self.source[start..end]) };
+        return try self.resolve_escapes(self.source[start..end]);
+    }
+
+    /// Scan a string, then check for adjacent string literals and concatenate them
+    fn scan_string_with_concat(self: *TextScanner) TextError!TextToken {
+        const first = try self.scan_single_string();
+
+        // Check for adjacent string literals (string concatenation)
+        self.skip_whitespace_and_comments();
+        if (self.pos < self.source.len and (self.source[self.pos] == '"' or self.source[self.pos] == '\'')) {
+            // Concatenate strings
+            var parts = std.ArrayListUnmanaged([]const u8).empty;
+            defer parts.deinit(self.allocator);
+            parts.append(self.allocator, first) catch return TextError.OutOfMemory;
+            var total_len: usize = first.len;
+
+            while (self.pos < self.source.len and (self.source[self.pos] == '"' or self.source[self.pos] == '\'')) {
+                const part = try self.scan_single_string();
+                parts.append(self.allocator, part) catch return TextError.OutOfMemory;
+                total_len += part.len;
+                self.skip_whitespace_and_comments();
+            }
+
+            // Allocate concatenated result
+            const result = self.allocator.alloc(u8, total_len) catch return TextError.OutOfMemory;
+            var offset: usize = 0;
+            for (parts.items) |part| {
+                @memcpy(result[offset..][0..part.len], part);
+                offset += part.len;
+            }
+            self.allocated_strings.append(self.allocator, result) catch {
+                self.allocator.free(result);
+                return TextError.OutOfMemory;
+            };
+            return .{ .string_literal = result };
+        }
+
+        return .{ .string_literal = first };
     }
 
     fn resolve_escapes(self: *TextScanner, raw: []const u8) TextError![]const u8 {
-        var result = self.allocator.alloc(u8, raw.len) catch return TextError.OutOfMemory;
+        // Allocate extra for potential UTF-8 expansions from \u/\U escapes
+        var result = self.allocator.alloc(u8, raw.len * 4) catch return TextError.OutOfMemory;
         var out: usize = 0;
         var i: usize = 0;
 
@@ -299,6 +420,26 @@ pub const TextScanner = struct {
                     },
                     't' => {
                         result[out] = '\t';
+                        out += 1;
+                        i += 1;
+                    },
+                    'a' => {
+                        result[out] = 0x07; // bell
+                        out += 1;
+                        i += 1;
+                    },
+                    'b' => {
+                        result[out] = 0x08; // backspace
+                        out += 1;
+                        i += 1;
+                    },
+                    'f' => {
+                        result[out] = 0x0C; // form feed
+                        out += 1;
+                        i += 1;
+                    },
+                    'v' => {
+                        result[out] = 0x0B; // vertical tab
                         out += 1;
                         i += 1;
                     },
@@ -334,6 +475,54 @@ pub const TextScanner = struct {
                         result[out] = (hi << 4) | lo;
                         out += 1;
                         i += 2;
+                    },
+                    'u' => {
+                        // \uHHHH — 4-digit unicode
+                        i += 1;
+                        if (i + 4 > raw.len) {
+                            self.allocator.free(result);
+                            return TextError.InvalidEscape;
+                        }
+                        var codepoint: u21 = 0;
+                        for (0..4) |_| {
+                            const d = hex_digit(raw[i]) orelse {
+                                self.allocator.free(result);
+                                return TextError.InvalidEscape;
+                            };
+                            codepoint = codepoint * 16 + d;
+                            i += 1;
+                        }
+                        const len = std.unicode.utf8Encode(codepoint, result[out..][0..4]) catch {
+                            self.allocator.free(result);
+                            return TextError.InvalidEscape;
+                        };
+                        out += len;
+                    },
+                    'U' => {
+                        // \UHHHHHHHH — 8-digit unicode
+                        i += 1;
+                        if (i + 8 > raw.len) {
+                            self.allocator.free(result);
+                            return TextError.InvalidEscape;
+                        }
+                        var codepoint: u32 = 0;
+                        for (0..8) |_| {
+                            const d = hex_digit(raw[i]) orelse {
+                                self.allocator.free(result);
+                                return TextError.InvalidEscape;
+                            };
+                            codepoint = codepoint * 16 + d;
+                            i += 1;
+                        }
+                        if (codepoint > 0x10FFFF) {
+                            self.allocator.free(result);
+                            return TextError.InvalidEscape;
+                        }
+                        const len = std.unicode.utf8Encode(@intCast(codepoint), result[out..][0..4]) catch {
+                            self.allocator.free(result);
+                            return TextError.InvalidEscape;
+                        };
+                        out += len;
                     },
                     '0'...'7' => {
                         // Octal escape
@@ -387,9 +576,85 @@ pub const TextScanner = struct {
         // Optional leading minus
         if (self.pos < self.source.len and self.source[self.pos] == '-') {
             self.pos += 1;
+            // Check if next is identifier (e.g., -inf, -infinity, -nan)
+            if (self.pos < self.source.len and is_ident_start(self.source[self.pos])) {
+                while (self.pos < self.source.len and is_ident_char(self.source[self.pos])) {
+                    self.pos += 1;
+                }
+                return .{ .float_literal = self.source[start..self.pos] };
+            }
         }
 
-        // Digits
+        // Check for no-leading-zero: starts with '.'
+        if (self.pos < self.source.len and self.source[self.pos] == '.') {
+            is_float = true;
+            self.pos += 1;
+            while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+                self.pos += 1;
+            }
+            // Exponent after no-leading-zero
+            if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
+                self.pos += 1;
+                if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
+                    self.pos += 1;
+                }
+                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+                    self.pos += 1;
+                }
+            }
+            // Consume trailing F/f suffix
+            if (self.pos < self.source.len and (self.source[self.pos] == 'F' or self.source[self.pos] == 'f')) {
+                self.pos += 1;
+            }
+            return .{ .float_literal = self.source[start..self.pos] };
+        }
+
+        // Check for hex (0x/0X) or octal (leading 0) prefix
+        if (self.pos < self.source.len and self.source[self.pos] == '0') {
+            self.pos += 1;
+            if (self.pos < self.source.len and (self.source[self.pos] == 'x' or self.source[self.pos] == 'X')) {
+                // Hex literal
+                self.pos += 1;
+                while (self.pos < self.source.len and is_hex_char(self.source[self.pos])) {
+                    self.pos += 1;
+                }
+                return .{ .integer = self.source[start..self.pos] };
+            }
+            // Could be octal (leading 0), or just "0", or "0.5" float
+            // Consume remaining octal/decimal digits
+            while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+                self.pos += 1;
+            }
+            // Check for decimal point (it's a float, not octal)
+            if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                is_float = true;
+                self.pos += 1;
+                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+                    self.pos += 1;
+                }
+            }
+            // Check for exponent
+            if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
+                is_float = true;
+                self.pos += 1;
+                if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
+                    self.pos += 1;
+                }
+                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+                    self.pos += 1;
+                }
+            }
+            // Consume trailing F/f suffix for floats
+            if (self.pos < self.source.len and (self.source[self.pos] == 'F' or self.source[self.pos] == 'f')) {
+                is_float = true;
+                self.pos += 1;
+            }
+            const text = self.source[start..self.pos];
+            if (is_float) return .{ .float_literal = text };
+            return .{ .integer = text };
+        }
+
+        // Regular digits
         while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
             self.pos += 1;
         }
@@ -415,11 +680,21 @@ pub const TextScanner = struct {
             }
         }
 
+        // Consume trailing F/f suffix for floats
+        if (self.pos < self.source.len and (self.source[self.pos] == 'F' or self.source[self.pos] == 'f')) {
+            is_float = true;
+            self.pos += 1;
+        }
+
         const text = self.source[start..self.pos];
         if (is_float) {
             return .{ .float_literal = text };
         }
         return .{ .integer = text };
+    }
+
+    fn is_hex_char(c: u8) bool {
+        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
     }
 
     fn scan_identifier(self: *TextScanner) TextToken {
@@ -448,12 +723,31 @@ pub const TextScanner = struct {
 
 // ── Scanner Read Helpers ──────────────────────────────────────────────
 
-/// Read and return a text format string literal
+/// Read and return a text format string literal (concatenation is handled by the scanner)
 pub fn read_string(scanner: *TextScanner) TextError![]const u8 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
         .string_literal => |s| return s,
         else => return TextError.UnexpectedToken,
+    }
+}
+
+/// Validate that a string contains valid UTF-8 (for proto3 string fields)
+pub fn validate_utf8(s: []const u8) TextError!void {
+    if (!std.unicode.utf8ValidateSlice(s)) {
+        return TextError.InvalidUtf8;
+    }
+}
+
+/// Skip optional field separator (comma or semicolon) between fields
+pub fn skip_separator(scanner: *TextScanner) TextError!void {
+    if (try scanner.peek()) |tok| {
+        switch (tok) {
+            .comma, .semicolon => {
+                _ = try scanner.next();
+            },
+            else => {},
+        }
     }
 }
 
@@ -478,7 +772,7 @@ pub fn read_int32(scanner: *TextScanner) TextError!i32 {
         .float_literal => |n| n,
         else => return TextError.UnexpectedToken,
     };
-    return std.fmt.parseInt(i32, text, 10) catch return TextError.Overflow;
+    return parse_proto_int(i32, text);
 }
 
 /// Read a text format integer as an i64
@@ -489,7 +783,7 @@ pub fn read_int64(scanner: *TextScanner) TextError!i64 {
         .float_literal => |n| n,
         else => return TextError.UnexpectedToken,
     };
-    return std.fmt.parseInt(i64, text, 10) catch return TextError.Overflow;
+    return parse_proto_int(i64, text);
 }
 
 /// Read a text format integer as a u32
@@ -500,7 +794,7 @@ pub fn read_uint32(scanner: *TextScanner) TextError!u32 {
         .float_literal => |n| n,
         else => return TextError.UnexpectedToken,
     };
-    return std.fmt.parseInt(u32, text, 10) catch return TextError.Overflow;
+    return parse_proto_int(u32, text);
 }
 
 /// Read a text format integer as a u64
@@ -511,7 +805,7 @@ pub fn read_uint64(scanner: *TextScanner) TextError!u64 {
         .float_literal => |n| n,
         else => return TextError.UnexpectedToken,
     };
-    return std.fmt.parseInt(u64, text, 10) catch return TextError.Overflow;
+    return parse_proto_int(u64, text);
 }
 
 /// Read a text format number or identifier (nan/inf) as an f32
@@ -519,12 +813,24 @@ pub fn read_float32(scanner: *TextScanner) TextError!f32 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
         .identifier => |name| {
-            if (std.mem.eql(u8, name, "nan")) return std.math.nan(f32);
-            if (std.mem.eql(u8, name, "inf") or std.mem.eql(u8, name, "infinity")) return std.math.inf(f32);
+            if (eql_case_insensitive(name, "nan")) return std.math.nan(f32);
+            if (eql_case_insensitive(name, "inf") or eql_case_insensitive(name, "infinity")) return std.math.inf(f32);
             return TextError.UnexpectedToken;
         },
-        .integer => |text| return std.fmt.parseFloat(f32, text) catch return TextError.InvalidNumber,
-        .float_literal => |text| return std.fmt.parseFloat(f32, text) catch return TextError.InvalidNumber,
+        .integer => |text| return parse_text_float(f32, text),
+        .float_literal => |text| {
+            // Check for -inf/-nan/-infinity (produced by scan_number when '-' precedes an identifier)
+            if (text.len > 1 and text[0] == '-') {
+                const ident = text[1..];
+                if (eql_case_insensitive(ident, "inf") or eql_case_insensitive(ident, "infinity")) {
+                    return -std.math.inf(f32);
+                }
+                if (eql_case_insensitive(ident, "nan")) {
+                    return std.math.nan(f32); // NaN sign is irrelevant
+                }
+            }
+            return parse_text_float(f32, text);
+        },
         else => return TextError.UnexpectedToken,
     }
 }
@@ -534,14 +840,96 @@ pub fn read_float64(scanner: *TextScanner) TextError!f64 {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
         .identifier => |name| {
-            if (std.mem.eql(u8, name, "nan")) return std.math.nan(f64);
-            if (std.mem.eql(u8, name, "inf") or std.mem.eql(u8, name, "infinity")) return std.math.inf(f64);
+            if (eql_case_insensitive(name, "nan")) return std.math.nan(f64);
+            if (eql_case_insensitive(name, "inf") or eql_case_insensitive(name, "infinity")) return std.math.inf(f64);
             return TextError.UnexpectedToken;
         },
-        .integer => |text| return std.fmt.parseFloat(f64, text) catch return TextError.InvalidNumber,
-        .float_literal => |text| return std.fmt.parseFloat(f64, text) catch return TextError.InvalidNumber,
+        .integer => |text| return parse_text_float(f64, text),
+        .float_literal => |text| {
+            // Check for -inf/-nan/-infinity (produced by scan_number when '-' precedes an identifier)
+            if (text.len > 1 and text[0] == '-') {
+                const ident = text[1..];
+                if (eql_case_insensitive(ident, "inf") or eql_case_insensitive(ident, "infinity")) {
+                    return -std.math.inf(f64);
+                }
+                if (eql_case_insensitive(ident, "nan")) {
+                    return std.math.nan(f64); // NaN sign is irrelevant
+                }
+            }
+            return parse_text_float(f64, text);
+        },
         else => return TextError.UnexpectedToken,
     }
+}
+
+/// Parse a text format number string as a float, stripping F/f suffix
+/// Note: hex (0x...) and octal (0-prefix) are NOT valid for float fields in text format
+fn parse_text_float(comptime T: type, text: []const u8) TextError!T {
+    // Strip trailing F/f suffix
+    var s = text;
+    if (s.len > 0 and (s[s.len - 1] == 'F' or s[s.len - 1] == 'f')) {
+        s = s[0 .. s.len - 1];
+    }
+    // Reject hex literals for float fields
+    const check = if (s.len > 0 and s[0] == '-') s[1..] else s;
+    if (check.len > 1 and check[0] == '0' and (check[1] == 'x' or check[1] == 'X')) {
+        return TextError.InvalidNumber;
+    }
+    // Reject octal literals for float fields (leading 0 followed by digits, no decimal/exponent)
+    if (check.len > 1 and check[0] == '0' and check[1] >= '0' and check[1] <= '7') {
+        var is_pure_octal = true;
+        for (check[1..]) |c| {
+            if (c == '.' or c == 'e' or c == 'E') {
+                is_pure_octal = false;
+                break;
+            }
+        }
+        if (is_pure_octal) {
+            return TextError.InvalidNumber;
+        }
+    }
+    const val = std.fmt.parseFloat(T, s) catch return TextError.InvalidNumber;
+    // Preserve negative zero: if parseFloat returned +0 but the input was negative, return -0
+    if (val == 0 and !std.math.signbit(val) and s.len > 0 and s[0] == '-') {
+        return -val;
+    }
+    return val;
+}
+
+/// Parse a protobuf text format integer, handling C-style hex (0x) and octal (0-prefix)
+fn parse_proto_int(comptime T: type, text: []const u8) TextError!T {
+    if (text.len == 0) return TextError.InvalidNumber;
+
+    const is_neg = text[0] == '-';
+    const abs = if (is_neg) text[1..] else text;
+
+    // Hex: 0x / 0X — pass to parseInt with base 0 (handles the 0x prefix natively)
+    if (abs.len >= 2 and abs[0] == '0' and (abs[1] == 'x' or abs[1] == 'X')) {
+        return std.fmt.parseInt(T, text, 0) catch return TextError.Overflow;
+    }
+
+    // C-style octal: leading 0 followed by octal digits (no decimal point or exponent)
+    if (abs.len >= 2 and abs[0] == '0' and abs[1] >= '0' and abs[1] <= '7') {
+        const u_val = std.fmt.parseInt(u64, abs, 8) catch return TextError.Overflow;
+        if (is_neg) {
+            const neg_val: i128 = -@as(i128, u_val);
+            return std.math.cast(T, neg_val) orelse return TextError.Overflow;
+        } else {
+            return std.math.cast(T, u_val) orelse return TextError.Overflow;
+        }
+    }
+
+    // Decimal (positive or negative)
+    return std.fmt.parseInt(T, text, 10) catch return TextError.Overflow;
+}
+
+/// Case-insensitive string comparison
+fn eql_case_insensitive(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
+    }
+    return true;
 }
 
 /// Read a text format identifier as an enum name
@@ -553,7 +941,82 @@ pub fn read_enum_name(scanner: *TextScanner) TextError![]const u8 {
     }
 }
 
-/// Skip a field value: if the next token is `{`, skip to matching `}`;
+/// Read a bracketed extension/type-url name, stripping inner whitespace/comments.
+/// Example: `[foo .bar # c\n .baz]` -> `foo.bar.baz`
+pub fn read_bracketed_name(scanner: *TextScanner) TextError![]const u8 {
+    const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
+    if (tok != .open_bracket) return TextError.UnexpectedToken;
+
+    var out = std.ArrayListUnmanaged(u8).empty;
+    defer out.deinit(scanner.allocator);
+
+    while (true) {
+        if (scanner.pos >= scanner.source.len) return TextError.UnexpectedEndOfInput;
+        const c = scanner.source[scanner.pos];
+
+        switch (c) {
+            ']' => {
+                scanner.pos += 1;
+                if (out.items.len == 0) return TextError.UnexpectedToken;
+                const owned = out.toOwnedSlice(scanner.allocator) catch return TextError.OutOfMemory;
+                scanner.allocated_strings.append(scanner.allocator, owned) catch {
+                    scanner.allocator.free(owned);
+                    return TextError.OutOfMemory;
+                };
+                return owned;
+            },
+            '#'=> {
+                // Skip to end-of-line comment inside bracketed names.
+                scanner.pos += 1;
+                while (scanner.pos < scanner.source.len and scanner.source[scanner.pos] != '\n') {
+                    scanner.pos += 1;
+                }
+            },
+            ' ', '\t', '\n', '\r' => {
+                scanner.pos += 1;
+            },
+            else => {
+                out.append(scanner.allocator, c) catch return TextError.OutOfMemory;
+                scanner.pos += 1;
+            },
+        }
+    }
+}
+
+/// Return final component of an extension name.
+/// Example: `pkg.sub.ext_name` -> `ext_name`
+pub fn extension_name_tail(full_name: []const u8) []const u8 {
+    return if (std.mem.lastIndexOfScalar(u8, full_name, '.')) |idx| full_name[idx + 1 ..] else full_name;
+}
+
+/// Validate an Any type URL's percent-escapes and that it includes a type name.
+pub fn is_valid_any_type_url(type_url: []const u8) bool {
+    if (type_url.len == 0) return false;
+    var i: usize = 0;
+    while (i < type_url.len) : (i += 1) {
+        if (type_url[i] == '%') {
+            if (i + 2 >= type_url.len) return false;
+            const c1 = type_url[i + 1];
+            const c2 = type_url[i + 2];
+            const c1_hex = (c1 >= '0' and c1 <= '9') or (c1 >= 'a' and c1 <= 'f') or (c1 >= 'A' and c1 <= 'F');
+            const c2_hex = (c2 >= '0' and c2 <= '9') or (c2 >= 'a' and c2 <= 'f') or (c2 >= 'A' and c2 <= 'F');
+            if (!c1_hex or !c2_hex) return false;
+            i += 2;
+        }
+    }
+    const slash = std.mem.lastIndexOfScalar(u8, type_url, '/') orelse return false;
+    return slash + 1 < type_url.len;
+}
+
+/// Return the message type name suffix from an Any type URL.
+/// Example: `type.googleapis.com/pkg.Message` -> `pkg.Message`
+pub fn any_type_name(type_url: []const u8) ?[]const u8 {
+    const slash = std.mem.lastIndexOfScalar(u8, type_url, '/') orelse return null;
+    if (slash + 1 >= type_url.len) return null;
+    return type_url[slash + 1 ..];
+}
+
+/// Skip a field value: if the next token is `{` or `<`, skip to matching closer;
 /// otherwise skip one value token.
 pub fn skip_field(scanner: *TextScanner) TextError!void {
     // Check if next is colon — consume it if so
@@ -565,6 +1028,28 @@ pub fn skip_field(scanner: *TextScanner) TextError!void {
             else => {},
         }
     }
+    // After colon, check for bracket list syntax [...]
+    if (try scanner.peek()) |tok| {
+        if (tok == .open_bracket) {
+            _ = try scanner.next();
+            while (true) {
+                const inner = try scanner.peek() orelse return TextError.UnexpectedEndOfInput;
+                if (inner == .close_bracket) {
+                    _ = try scanner.next();
+                    return;
+                }
+                // Skip value and optional comma
+                try skip_field_value(scanner);
+                if (try scanner.peek()) |sep| {
+                    if (sep == .comma) _ = try scanner.next();
+                }
+            }
+        }
+    }
+    try skip_field_value(scanner);
+}
+
+fn skip_field_value(scanner: *TextScanner) TextError!void {
     const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
         .open_brace => {
@@ -578,38 +1063,43 @@ pub fn skip_field(scanner: *TextScanner) TextError!void {
                 }
             }
         },
+        .open_angle => {
+            var depth: usize = 1;
+            while (depth > 0) {
+                const inner = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
+                switch (inner) {
+                    .open_angle => depth += 1,
+                    .close_angle => depth -= 1,
+                    else => {},
+                }
+            }
+        },
         .identifier, .string_literal, .integer, .float_literal => {},
-        .colon, .close_brace => return TextError.UnexpectedToken,
+        .colon, .close_brace, .close_angle, .comma, .semicolon,
+        .open_bracket, .close_bracket,
+        => return TextError.UnexpectedToken,
     }
 }
 
-// Handle "-inf" and "-infinity" — scanner sees '-' as start of negative number,
-// but "-inf" is actually an identifier-like token. We need a special read for
-// negative float identifiers. This is handled by checking for a leading minus
-// followed by an identifier.
-
-/// Read an f32 handling negative inf/nan identifiers
-pub fn read_float32_with_sign(scanner: *TextScanner) TextError!f32 {
-    // Peek to see if we have a negative number token that might be "-inf"/"-nan"
-    const tok = try scanner.peek() orelse return TextError.UnexpectedEndOfInput;
+/// Read a text-format enum literal as either a symbolic name or numeric value.
+pub fn read_enum_or_int(scanner: *TextScanner) TextError!EnumOrInt {
+    const tok = try scanner.next() orelse return TextError.UnexpectedEndOfInput;
     switch (tok) {
-        .identifier => |name| {
-            _ = try scanner.next();
-            if (std.mem.eql(u8, name, "nan")) return std.math.nan(f32);
-            if (std.mem.eql(u8, name, "inf") or std.mem.eql(u8, name, "infinity")) return std.math.inf(f32);
-            return TextError.UnexpectedToken;
-        },
+        .identifier => |name| return .{ .name = name },
         .integer => |text| {
-            _ = try scanner.next();
-            return std.fmt.parseFloat(f32, text) catch return TextError.InvalidNumber;
+            const val = try parse_proto_int(i32, text);
+            return .{ .number = val };
         },
-        .float_literal => |text| {
-            _ = try scanner.next();
-            return std.fmt.parseFloat(f32, text) catch return TextError.InvalidNumber;
-        },
-        else => return read_float32(scanner),
+        else => return TextError.UnexpectedToken,
     }
 }
+
+/// Result of parsing an enum literal in text format.
+/// Open enums may be represented as either symbolic names or numeric values.
+pub const EnumOrInt = union(enum) {
+    name: []const u8,
+    number: i32,
+};
 
 // ══════════════════════════════════════════════════════════════════════
 // Tests
@@ -712,6 +1202,18 @@ test "write_bool: false" {
 test "write_enum_name: bare identifier" {
     const result = try test_write(write_enum_name, .{"ACTIVE"});
     try testing.expectEqualStrings("ACTIVE", result);
+}
+
+test "write_enum_value: known enum name" {
+    const E = enum(i32) { UNKNOWN = 0, ACTIVE = 1, _ };
+    const result = try test_write(write_enum_value, .{@as(E, @enumFromInt(1))});
+    try testing.expectEqualStrings("ACTIVE", result);
+}
+
+test "write_enum_value: unknown enum numeric fallback" {
+    const E = enum(i32) { UNKNOWN = 0, ACTIVE = 1, _ };
+    const result = try test_write(write_enum_value, .{@as(E, @enumFromInt(12345))});
+    try testing.expectEqualStrings("12345", result);
 }
 
 // ── Scanner Tests ─────────────────────────────────────────────────────
@@ -886,10 +1388,29 @@ test "read_float64: inf" {
     try testing.expect(std.math.isInf(try read_float64(&s)));
 }
 
+test "read_float64: negative inf identifier forms" {
+    var s1 = TextScanner.init(testing.allocator, "-inf");
+    defer s1.deinit();
+    const v1 = try read_float64(&s1);
+    try testing.expect(std.math.isInf(v1) and v1 < 0);
+
+    var s2 = TextScanner.init(testing.allocator, "-INF");
+    defer s2.deinit();
+    const v2 = try read_float64(&s2);
+    try testing.expect(std.math.isInf(v2) and v2 < 0);
+}
+
 test "read_float32: nan" {
     var s = TextScanner.init(testing.allocator, "nan");
     defer s.deinit();
     try testing.expect(std.math.isNan(try read_float32(&s)));
+}
+
+test "read_float32: negative mixed-case inf" {
+    var s = TextScanner.init(testing.allocator, "-iNF");
+    defer s.deinit();
+    const v = try read_float32(&s);
+    try testing.expect(std.math.isInf(v) and v < 0);
 }
 
 test "read_enum_name" {
