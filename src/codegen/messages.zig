@@ -1722,6 +1722,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
                         try e.print("const old = result.{f};\n", .{escaped});
                         try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                        try e.print("errdefer allocator.free(new);\n", .{});
                         try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         try e.print("var packed_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
                         try e.print("var idx: usize = old.len;\n", .{});
@@ -1751,6 +1752,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         try e.open_brace();
                         try e.print("const old = result.{f};\n", .{escaped});
                         try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
+                        try e.print("errdefer allocator.free(new);\n", .{});
                         try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         if (s == .string and syntax == .proto3) {
                             try e.print("try message.validate_utf8(field.value.len);\n", .{});
@@ -1833,6 +1835,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                     try e.open_brace();
                     try e.print("const old = result.{f};\n", .{escaped});
                     try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
+                    try e.print("errdefer allocator.free(new);\n", .{});
                     try e.print("@memcpy(new[0..old.len], old);\n", .{});
                     try e.print("new[old.len] = try @TypeOf(old[0]).decode_inner(allocator, field.value.len, depth_remaining - 1);\n", .{});
                     try e.print("if (old.len > 0) allocator.free(old);\n", .{});
@@ -1862,6 +1865,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                     try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
                     try e.print("const old = result.{f};\n", .{escaped});
                     try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + count);\n", .{});
+                    try e.print("errdefer allocator.free(new);\n", .{});
                     try e.print("@memcpy(new[0..old.len], old);\n", .{});
                     try e.print("var packed_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
                     try e.print("var idx: usize = old.len;\n", .{});
@@ -1902,6 +1906,7 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField, syntax: ast.Syntax
     // Declare key/value temporaries
     try emit_decode_map_key_decl(e, map_field.key_type);
     try emit_decode_map_value_decl(e, map_field.value_type);
+    try emit_decode_map_errdefer(e, map_field.key_type, map_field.value_type);
 
     try e.print("while (try entry_iter.next()) |entry|", .{});
     try e.open_brace();
@@ -1946,6 +1951,23 @@ fn emit_decode_map_value_decl(e: *Emitter, value_type: ast.TypeRef) !void {
         .enum_ref => |name| {
             try e.print("var entry_val: {s} = @enumFromInt(0);\n", .{name});
         },
+    }
+}
+
+fn emit_decode_map_errdefer(e: *Emitter, key_type: ast.ScalarType, value_type: ast.TypeRef) !void {
+    if (key_type == .string) {
+        try e.print("errdefer {{ if (entry_key.len > 0) allocator.free(entry_key); }}\n", .{});
+    }
+    switch (value_type) {
+        .scalar => |s| {
+            if (s == .string or s == .bytes) {
+                try e.print("errdefer {{ if (entry_val.len > 0) allocator.free(entry_val); }}\n", .{});
+            }
+        },
+        .named => {
+            try e.print("errdefer {{ if (entry_val) |*v| v.deinit(allocator); }}\n", .{});
+        },
+        .enum_ref => {},
     }
 }
 
@@ -2086,6 +2108,7 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
             try e.open_brace();
             try e.print("const old = result.{f};\n", .{escaped});
             try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{grp.name});
+            try e.print("errdefer allocator.free(new);\n", .{});
             try e.print("@memcpy(new[0..old.len], old);\n", .{});
             try e.print("new[old.len] = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1);\n", .{ grp.name, num });
             try e.print("if (old.len > 0) allocator.free(old);\n", .{});
@@ -2137,6 +2160,21 @@ fn emit_map_put_with_free(e: *Emitter, escaped: types.EscapedName, key_type: ast
     // For non-found case with getOrPut, key is already stored
     try e.print("\n", .{});
     try e.print("_gop.value_ptr.* = {s};\n", .{val_expr});
+}
+
+/// Emit errdefer to clean up a local `list` variable on error paths.
+/// Frees string/bytes elements and the list backing array.
+fn emit_list_errdefer(e: *Emitter, s: ast.ScalarType) !void {
+    if (s == .string or s == .bytes) {
+        try e.print("errdefer {{ for (list.items) |_item| allocator.free(_item); list.deinit(allocator); }}\n", .{});
+    } else {
+        try e.print("errdefer list.deinit(allocator);\n", .{});
+    }
+}
+
+/// Emit errdefer for a list of named (message) types - deinits each element.
+fn emit_named_list_errdefer(e: *Emitter) !void {
+    try e.print("errdefer {{ for (list.items) |*_item| _item.deinit(allocator); list.deinit(allocator); }}\n", .{});
 }
 
 // ── Deinit Method ─────────────────────────────────────────────────────
@@ -4037,6 +4075,7 @@ fn emit_from_json_repeated_scalar(e: *Emitter, escaped: types.EscapedName, s: as
     try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{types.scalar_zig_type(s)});
+    try emit_list_errdefer(e, s);
     try e.print("while (true)", .{});
     try e.open_brace();
     try e.print("if (try scanner.peek()) |p| {{\n", .{});
@@ -4059,6 +4098,7 @@ fn emit_from_json_repeated_named(e: *Emitter, escaped: types.EscapedName, name: 
     try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
+    try emit_named_list_errdefer(e);
     try e.print("while (true)", .{});
     try e.open_brace();
     try e.print("if (try scanner.peek()) |p| {{\n", .{});
@@ -4080,6 +4120,7 @@ fn emit_from_json_repeated_enum(e: *Emitter, escaped: types.EscapedName, enum_na
     try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
     try e.print("var list: std.ArrayListUnmanaged(@TypeOf(result.{f}[0])) = .empty;\n", .{escaped});
+    try e.print("errdefer list.deinit(allocator);\n", .{});
     try e.print("while (true)", .{});
     try e.open_brace();
     try e.print("if (try scanner.peek()) |p| {{\n", .{});
@@ -4137,6 +4178,7 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     // Coerce key
     if (types.is_string_key(map_field.key_type)) {
         try e.print("const map_key = try allocator.dupe(u8, map_key_str);\n", .{});
+        try e.print("errdefer allocator.free(map_key);\n", .{});
     } else if (map_field.key_type == .bool) {
         try e.print("const map_key = std.mem.eql(u8, map_key_str, \"true\");\n", .{});
     } else {
@@ -4151,14 +4193,17 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
             const read_fn = types.scalar_json_read_fn(s);
             if (s == .string) {
                 try e.print("const map_val = try allocator.dupe(u8, try {s}.{s}(scanner));\n", .{ json_mod, read_fn });
+                try e.print("errdefer allocator.free(map_val);\n", .{});
             } else if (s == .bytes) {
                 try e.print("const map_val = try {s}.{s}(scanner, allocator);\n", .{ json_mod, read_fn });
+                try e.print("errdefer allocator.free(map_val);\n", .{});
             } else {
                 try e.print("const map_val = try {s}.{s}(scanner);\n", .{ json_mod, read_fn });
             }
         },
         .named => |name| {
-            try e.print("const map_val = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+            try e.print("var map_val = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+            try e.print("errdefer map_val.deinit(allocator);\n", .{});
         },
         .enum_ref => |name| {
             try e.print("const map_val_opt: ?{s} = blk: {{\n", .{name});
@@ -5085,6 +5130,7 @@ fn emit_from_text_repeated_scalar(e: *Emitter, escaped: types.EscapedName, s: as
     try e.print("{{\n", .{});
     e.indent_level += 1;
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{types.scalar_zig_type(s)});
+    try emit_list_errdefer(e, s);
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
     // Check for bracket list form: field: [val, val, ...]
@@ -5141,6 +5187,7 @@ fn emit_from_text_repeated_named(e: *Emitter, escaped: types.EscapedName, name: 
     try e.print("{{\n", .{});
     e.indent_level += 1;
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
+    try emit_named_list_errdefer(e);
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
     try e.print("try list.append(allocator, try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1));\n", .{name});
@@ -5155,6 +5202,7 @@ fn emit_from_text_repeated_enum(e: *Emitter, escaped: types.EscapedName) !void {
     try e.print("{{\n", .{});
     e.indent_level += 1;
     try e.print("var list: std.ArrayListUnmanaged(@TypeOf(result.{f}[0])) = .empty;\n", .{escaped});
+    try e.print("errdefer list.deinit(allocator);\n", .{});
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
     // Check for bracket list form
@@ -5223,6 +5271,23 @@ fn emit_text_expect_close_brace_or_angle(e: *Emitter) !void {
     try e.print("}}\n", .{});
 }
 
+fn emit_text_map_errdefer(e: *Emitter, key_type: ast.ScalarType, value_type: ast.TypeRef) !void {
+    if (types.is_string_key(key_type)) {
+        try e.print("errdefer {{ if (map_key) |k| allocator.free(k); }}\n", .{});
+    }
+    switch (value_type) {
+        .scalar => |s| {
+            if (s == .string or s == .bytes) {
+                try e.print("errdefer {{ if (map_val) |v| {{ if (v.len > 0) allocator.free(v); }} }}\n", .{});
+            }
+        },
+        .named => {
+            try e.print("errdefer {{ if (map_val) |*v| v.deinit(allocator); }}\n", .{});
+        },
+        .enum_ref => {},
+    }
+}
+
 fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch: *bool) !void {
     const escaped = types.escape_zig_keyword(map_field.name);
 
@@ -5249,6 +5314,7 @@ fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
         .enum_ref => |n| n,
     };
     try e.print("var map_val: ?{s} = null;\n", .{value_zig_type});
+    try emit_text_map_errdefer(e, map_field.key_type, map_field.value_type);
 
     // Loop inside map entry
     try e.print("while (try scanner.peek()) |entry_tok|", .{});
