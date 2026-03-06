@@ -686,7 +686,7 @@ fn emit_group_to_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !void
         try e.print("try json.write_object_start(writer);\n", .{});
         try e.print("var first = true;\n", .{});
         for (group.fields) |field| {
-            try emit_json_field(e, field, .proto2, "");
+            try emit_json_field(e, field, .proto2, "", &.{});
         }
         try e.print("try json.write_object_end(writer);\n", .{});
     } else {
@@ -768,7 +768,7 @@ fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax, rec
     // Field matching
     var first_branch = true;
     for (group.fields) |field| {
-        try emit_from_json_field_branch(e, field, .proto2, &first_branch, recursive_types, "");
+        try emit_from_json_field_branch(e, field, .proto2, &first_branch, recursive_types, "", &.{});
     }
 
     // else: skip unknown
@@ -3259,7 +3259,7 @@ fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_n
 
         for (items) |item| {
             switch (item) {
-                .field => |f| try emit_json_field(e, f, syntax, full_name),
+                .field => |f| try emit_json_field(e, f, syntax, full_name, msg.extension_ranges),
                 .map => |m| try emit_json_map(e, m),
                 .oneof => |o| try emit_json_oneof(e, o, full_name),
                 .group => |g| try emit_json_group(e, g),
@@ -3273,6 +3273,16 @@ fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_n
         try e.print("try json.write_object_end(writer);\n", .{});
     }
     try e.close_brace_nosemi();
+}
+
+/// Build the JSON field name for an extension field: `[package.field_name]`
+/// `full_name` is the fully-qualified message name (e.g., "pkg.MessageName").
+fn extension_json_name(full_name: []const u8, field_name: []const u8, buf: []u8) []const u8 {
+    const pkg = if (std.mem.lastIndexOfScalar(u8, full_name, '.')) |idx| full_name[0..idx] else "";
+    if (pkg.len > 0) {
+        return std.fmt.bufPrint(buf, "[{s}.{s}]", .{ pkg, field_name }) catch field_name;
+    }
+    return std.fmt.bufPrint(buf, "[{s}]", .{field_name}) catch field_name;
 }
 
 fn json_field_name(field_name: []const u8, options: []const ast.FieldOption, buf: []u8) []const u8 {
@@ -3289,10 +3299,13 @@ fn json_field_name(field_name: []const u8, options: []const ast.FieldOption, buf
     return types.snake_to_lower_camel(field_name, buf);
 }
 
-fn emit_json_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax, full_name: []const u8) !void {
+fn emit_json_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax, full_name: []const u8, extension_ranges: []const ast.ExtensionRange) !void {
     const escaped = types.escape_zig_keyword(field.name);
     var json_name_buf: [256]u8 = undefined;
-    const jname = json_field_name(field.name, field.options, &json_name_buf);
+    const jname = if (number_in_extension_ranges(field.number, extension_ranges))
+        extension_json_name(full_name, field.name, &json_name_buf)
+    else
+        json_field_name(field.name, field.options, &json_name_buf);
 
     switch (field.type_name) {
         .scalar => |s| {
@@ -3943,7 +3956,7 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
     for (items) |item| {
         switch (item) {
             .field => |f| {
-                try emit_from_json_field_branch(e, f, syntax, &first_branch, recursive_types, full_name);
+                try emit_from_json_field_branch(e, f, syntax, &first_branch, recursive_types, full_name, msg.extension_ranges);
             },
             .map => |m| {
                 try emit_from_json_map_branch(e, m, &first_branch);
@@ -3978,8 +3991,9 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
     try e.close_brace_nosemi(); // fn
 }
 
-fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, first_branch: *bool, recursive_types: *const RecursiveTypes, full_name: []const u8) !void {
+fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, first_branch: *bool, recursive_types: *const RecursiveTypes, full_name: []const u8, extension_ranges: []const ast.ExtensionRange) !void {
     const escaped = types.escape_zig_keyword(field.name);
+    const is_extension = number_in_extension_ranges(field.number, extension_ranges);
     var json_name_buf: [256]u8 = undefined;
     const jname = json_field_name(field.name, field.options, &json_name_buf);
     const json_mod = "json";
@@ -3994,6 +4008,12 @@ fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, fir
     try e.print_raw("std.mem.eql(u8, key, \"{s}\")", .{jname});
     if (!std.mem.eql(u8, jname, field.name)) {
         try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{field.name});
+    }
+    // For extension fields, also match bracket notation: [package.field_name]
+    if (is_extension) {
+        var ext_name_buf: [512]u8 = undefined;
+        const ext_jname = extension_json_name(full_name, field.name, &ext_name_buf);
+        try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{ext_jname});
     }
     try e.print_raw(")", .{});
     try e.open_brace();

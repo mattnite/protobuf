@@ -135,7 +135,7 @@ fn do_test_typed(comptime T: type, allocator: std.mem.Allocator, request: *Confo
             break :blk .{ .result = .{ .json_payload = encoded } };
         },
         .TEXT_FORMAT => blk: {
-            const encoded = encode_text(T, msg, allocator) catch |err| {
+            const encoded = encode_text(T, msg, request.print_unknown_fields, allocator) catch |err| {
                 break :blk serialize_error(allocator, @errorName(err));
             };
             break :blk .{ .result = .{ .text_payload = encoded } };
@@ -159,10 +159,13 @@ fn encode_json(comptime T: type, msg: T, allocator: std.mem.Allocator) ![]const 
     return try alloc_writer.toOwnedSlice();
 }
 
-fn encode_text(comptime T: type, msg: T, allocator: std.mem.Allocator) ![]const u8 {
+fn encode_text(comptime T: type, msg: T, print_unknown_fields: bool, allocator: std.mem.Allocator) ![]const u8 {
     var alloc_writer: std.Io.Writer.Allocating = .init(allocator);
     defer alloc_writer.deinit();
     try msg.to_text(&alloc_writer.writer);
+    if (print_unknown_fields and msg._unknown_fields.len > 0) {
+        try protobuf.text_format.write_unknown_fields(&alloc_writer.writer, msg._unknown_fields, 0);
+    }
     return try alloc_writer.toOwnedSlice();
 }
 
