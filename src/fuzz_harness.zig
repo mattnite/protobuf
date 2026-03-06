@@ -37,6 +37,16 @@ const active = std.meta.stringToEnum(FuzzTarget, @import("build_options").fuzz_t
 var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
 var arena: std.heap.ArenaAllocator = undefined;
 
+pub fn main() !void {
+    var buf: [4096]u8 = undefined;
+    var r = std.fs.File.stdin().reader(&buf);
+    const input = try r.interface.allocRemaining(gpa.allocator(), .limited(1024 * 1024));
+    defer gpa.allocator().free(input);
+
+    arena = .init(gpa.allocator());
+    runFuzz(input);
+}
+
 export fn zig_fuzz_init() void {
     arena = .init(gpa.allocator());
 }
@@ -45,7 +55,10 @@ export fn zig_fuzz_test(buf: [*]u8, len_raw: isize) void {
     const len: usize = if (len_raw > 0) @intCast(len_raw) else 0;
     const input: []const u8 = if (len > 0) buf[0..len] else &.{};
     _ = arena.reset(.retain_capacity);
+    runFuzz(input);
+}
 
+fn runFuzz(input: []const u8) void {
     switch (active) {
         .lexer => fuzzLexer(input),
         .resolve_string => fuzzResolveString(input),
