@@ -3158,7 +3158,7 @@ fn emit_value_to_json_method(e: *Emitter) !void {
     try e.print("if (self.kind) |oneof_val| switch (oneof_val) {{\n", .{});
     e.indent_level += 1;
     try e.print(".null_value => |_| try json.write_null(writer),\n", .{});
-    try e.print(".number_value => |v| try json.write_float(writer, v),\n", .{});
+    try e.print(".number_value => |v| {{ if (std.math.isNan(v) or std.math.isInf(v)) return error.WriteFailed; try json.write_float(writer, v); }},\n", .{});
     try e.print(".string_value => |v| try json.write_string(writer, v),\n", .{});
     try e.print(".bool_value => |v| try json.write_bool(writer, v),\n", .{});
     try e.print(".struct_value => |sub| try sub.to_json(writer),\n", .{});

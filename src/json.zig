@@ -757,6 +757,10 @@ pub fn read_field_mask_paths(scanner: *JsonScanner, allocator: std.mem.Allocator
         if (i == text.len or text[i] == ',') {
             const part = text[start..i];
             if (part.len == 0) return JsonError.UnexpectedToken;
+            // JSON FieldMask paths must be lowerCamelCase — reject underscores
+            for (part) |c| {
+                if (c == '_') return JsonError.UnexpectedToken;
+            }
             const snake = camel_to_snake_alloc(allocator, part) catch return JsonError.OutOfMemory;
             try list.append(allocator, snake);
             start = i + 1;
@@ -767,13 +771,31 @@ pub fn read_field_mask_paths(scanner: *JsonScanner, allocator: std.mem.Allocator
 }
 
 /// Write protobuf FieldMask paths to JSON comma-separated lowerCamelCase string.
+/// Returns WriteFailed if a path cannot round-trip (uppercase letters, consecutive
+/// underscores, trailing underscore, or underscore before non-lowercase-letter).
 pub fn write_field_mask_paths(writer: *Writer, paths: []const []const u8) Error!void {
     try writer.writeByte('"');
     for (paths, 0..) |path, idx| {
         if (idx > 0) try writer.writeByte(',');
+        try validate_field_mask_path(path);
         try write_snake_as_camel(writer, path);
     }
     try writer.writeByte('"');
+}
+
+fn validate_field_mask_path(path: []const u8) Error!void {
+    var prev_underscore = false;
+    for (path) |c| {
+        if (c == '_') {
+            if (prev_underscore) return error.WriteFailed; // consecutive underscores
+            prev_underscore = true;
+        } else {
+            if (prev_underscore and !std.ascii.isLower(c)) return error.WriteFailed; // underscore before non-lowercase
+            if (std.ascii.isUpper(c)) return error.WriteFailed; // uppercase not allowed in wire format
+            prev_underscore = false;
+        }
+    }
+    if (prev_underscore) return error.WriteFailed; // trailing underscore
 }
 
 const CivilDate = struct {
