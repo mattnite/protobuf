@@ -34,10 +34,14 @@ const FuzzTarget = enum {
 const active = std.meta.stringToEnum(FuzzTarget, @import("build_options").fuzz_target) orelse
     @compileError("unknown fuzz target: " ++ @import("build_options").fuzz_target);
 
+const is_replay = @import("build_options").replay;
+
 var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
 var arena: std.heap.ArenaAllocator = undefined;
 
-pub fn main() !void {
+pub const main = if (is_replay) replayMain else @as(?void, null);
+
+fn replayMain() !void {
     var buf: [4096]u8 = undefined;
     var r = std.fs.File.stdin().reader(&buf);
     const input = try r.interface.allocRemaining(gpa.allocator(), .limited(1024 * 1024));

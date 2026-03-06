@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
     if (fuzz_target) |ft| {
         const fuzz_options = b.addOptions();
         fuzz_options.addOption([]const u8, "fuzz_target", ft);
+        fuzz_options.addOption(bool, "replay", false);
 
         const fuzz_obj = b.addObject(.{
             .name = "protobuf-fuzz",
@@ -111,6 +112,7 @@ pub fn build(b: *std.Build) void {
         // Plain replay binary (no AFL instrumentation) for crash triage
         const replay_options = b.addOptions();
         replay_options.addOption([]const u8, "fuzz_target", ft);
+        replay_options.addOption(bool, "replay", true);
 
         const replay_exe = b.addExecutable(.{
             .name = "fuzz-replay",
