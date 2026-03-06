@@ -145,13 +145,38 @@ fn write_unknown_fields_iter(writer: *Writer, iter: anytype, indent: usize, end_
                 writer.print("{d}: 0x{X:0>8}\n", .{ field.number, v }) catch return error.WriteFailed;
             },
             .len => |v| {
-                try write_indent(writer, indent);
-                writer.print("{d}: ", .{field.number}) catch return error.WriteFailed;
-                try write_string(writer, v);
-                try writer.writeByte('\n');
+                // Try to parse as a sub-message first; if all bytes are
+                // consumed by valid fields, print as a nested message.
+                if (looks_like_submessage(v)) {
+                    try write_indent(writer, indent);
+                    writer.print("{d} {{\n", .{field.number}) catch return error.WriteFailed;
+                    try write_unknown_fields(writer, v, indent + 1);
+                    try write_indent(writer, indent);
+                    try writer.writeAll("}\n");
+                } else {
+                    try write_indent(writer, indent);
+                    writer.print("{d}: ", .{field.number}) catch return error.WriteFailed;
+                    try write_string(writer, v);
+                    try writer.writeByte('\n');
+                }
             },
         }
     }
+}
+
+/// Check if raw bytes can be fully parsed as a valid protobuf message.
+/// Used to decide whether a LEN-encoded unknown field should be printed
+/// as a sub-message or as a raw string.
+fn looks_like_submessage(data: []const u8) bool {
+    if (data.len == 0) return false;
+    const message = @import("message.zig");
+    var iter = message.iterate_fields(data);
+    while (true) {
+        const field = iter.next() catch return false;
+        if (field == null) break;
+    }
+    // All bytes consumed by valid fields
+    return iter.pos == data.len;
 }
 
 // ══════════════════════════════════════════════════════════════════════

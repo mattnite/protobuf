@@ -104,31 +104,29 @@ jobs:
           commit: ${{ github.event.pull_request.head.sha }}
           targets: |
             lexer
-          duration: "120"
+            resolve_string
+            parser
+            varint_decode
+            varint_roundtrip
+            zigzag32_roundtrip
+            zigzag64_roundtrip
+            tag_decode
+            tag_roundtrip
+            fixed32_roundtrip
+            fixed64_roundtrip
+            int32_roundtrip
+            sint32_roundtrip
+            sint64_roundtrip
+            field_iterator
+            skip_field
+            skip_group
+            packed_varint
+            packed_fixed32
+            packed_fixed64
+            message_roundtrip
+            json_scanner
+            text_scanner
+            dynamic_decode
+          duration: "600"
           afl_args: "-m none"
-          target:
-            "x86_64-linux"
-
-            #resolve_string
-            #parser
-            #varint_decode
-            #varint_roundtrip
-            #zigzag32_roundtrip
-            #zigzag64_roundtrip
-            #tag_decode
-            #tag_roundtrip
-            #fixed32_roundtrip
-            #fixed64_roundtrip
-            #int32_roundtrip
-            #sint32_roundtrip
-            #sint64_roundtrip
-            #field_iterator
-            #skip_field
-            #skip_group
-            #packed_varint
-            #packed_fixed32
-            #packed_fixed64
-            #message_roundtrip
-            #json_scanner
-            #text_scanner
-            #dynamic_decode
+          target: "x86_64-linux"
