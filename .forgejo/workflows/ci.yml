@@ -95,38 +95,40 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Run AFL++ fuzz target and upload to Cairn
-        uses: https://git.ts.mattnite.net/mattnite/cairn/actions/cairn-zig-fuzz@main
+      - name: Fuzz test and Cairn upload
+        uses: https://git.ts.mattnite.net/mattnite/cairn/actions/cairn-zig-fuzz-afl@main
         with:
           cairn_server: ${{ secrets.CAIRN_SERVER_URL }}
           repo: ${{ github.event.repository.name }}
           owner: ${{ github.repository_owner }}
           commit: ${{ github.event.pull_request.head.sha }}
-          zig_build_args: |
-            fuzz -Dfuzz-target=lexer
-            fuzz -Dfuzz-target=resolve_string
-            fuzz -Dfuzz-target=parser
-            fuzz -Dfuzz-target=varint_decode
-            fuzz -Dfuzz-target=varint_roundtrip
-            fuzz -Dfuzz-target=zigzag32_roundtrip
-            fuzz -Dfuzz-target=zigzag64_roundtrip
-            fuzz -Dfuzz-target=tag_decode
-            fuzz -Dfuzz-target=tag_roundtrip
-            fuzz -Dfuzz-target=fixed32_roundtrip
-            fuzz -Dfuzz-target=fixed64_roundtrip
-            fuzz -Dfuzz-target=int32_roundtrip
-            fuzz -Dfuzz-target=sint32_roundtrip
-            fuzz -Dfuzz-target=sint64_roundtrip
-            fuzz -Dfuzz-target=field_iterator
-            fuzz -Dfuzz-target=skip_field
-            fuzz -Dfuzz-target=skip_group
-            fuzz -Dfuzz-target=packed_varint
-            fuzz -Dfuzz-target=packed_fixed32
-            fuzz -Dfuzz-target=packed_fixed64
-            fuzz -Dfuzz-target=message_roundtrip
-            fuzz -Dfuzz-target=json_scanner
-            fuzz -Dfuzz-target=text_scanner
-            fuzz -Dfuzz-target=dynamic_decode
+          targets: |
+            lexer
           duration: "120"
           afl_args: "-m none"
-          target: "x86_64-linux"
+          target:
+            "x86_64-linux"
+
+            #resolve_string
+            #parser
+            #varint_decode
+            #varint_roundtrip
+            #zigzag32_roundtrip
+            #zigzag64_roundtrip
+            #tag_decode
+            #tag_roundtrip
+            #fixed32_roundtrip
+            #fixed64_roundtrip
+            #int32_roundtrip
+            #sint32_roundtrip
+            #sint64_roundtrip
+            #field_iterator
+            #skip_field
+            #skip_group
+            #packed_varint
+            #packed_fixed32
+            #packed_fixed64
+            #message_roundtrip
+            #json_scanner
+            #text_scanner
+            #dynamic_decode
