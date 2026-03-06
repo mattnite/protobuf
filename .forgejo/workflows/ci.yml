@@ -103,7 +103,30 @@ jobs:
           owner: ${{ github.repository_owner }}
           commit: ${{ github.event.pull_request.head.sha }}
           zig_build_args: |
+            fuzz -Dfuzz-target=lexer
+            fuzz -Dfuzz-target=resolve_string
             fuzz -Dfuzz-target=parser
+            fuzz -Dfuzz-target=varint_decode
+            fuzz -Dfuzz-target=varint_roundtrip
+            fuzz -Dfuzz-target=zigzag32_roundtrip
+            fuzz -Dfuzz-target=zigzag64_roundtrip
+            fuzz -Dfuzz-target=tag_decode
+            fuzz -Dfuzz-target=tag_roundtrip
+            fuzz -Dfuzz-target=fixed32_roundtrip
+            fuzz -Dfuzz-target=fixed64_roundtrip
+            fuzz -Dfuzz-target=int32_roundtrip
+            fuzz -Dfuzz-target=sint32_roundtrip
+            fuzz -Dfuzz-target=sint64_roundtrip
+            fuzz -Dfuzz-target=field_iterator
+            fuzz -Dfuzz-target=skip_field
+            fuzz -Dfuzz-target=skip_group
+            fuzz -Dfuzz-target=packed_varint
+            fuzz -Dfuzz-target=packed_fixed32
+            fuzz -Dfuzz-target=packed_fixed64
+            fuzz -Dfuzz-target=message_roundtrip
+            fuzz -Dfuzz-target=json_scanner
+            fuzz -Dfuzz-target=text_scanner
+            fuzz -Dfuzz-target=dynamic_decode
           duration: "120"
           afl_args: "-m none"
           target: "x86_64-linux"
