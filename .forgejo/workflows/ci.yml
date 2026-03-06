@@ -130,3 +130,4 @@ jobs:
           duration: "600"
           afl_args: "-m none"
           target: "x86_64-linux"
+          seed_dir: "fuzz_seeds"
