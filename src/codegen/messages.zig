@@ -1693,11 +1693,17 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         try e.print_raw(" if (field.value == {s})", .{wire});
                         try e.open_brace();
                         try e.print("try message.validate_utf8(field.value.len);\n", .{});
+                        try emit_free_old_scalar(e, field.label, escaped, s);
                         try e.print("result.{f} = try allocator.dupe(u8, field.value.len);\n", .{escaped});
                         e.indent_level -= 1;
                         try e.print("}} else return error.InvalidWireType,\n", .{});
                     } else if (s == .string or s == .bytes) {
-                        try e.print_raw(" if (field.value == {s}) {{ result.{f} = try allocator.dupe(u8, {s}); }} else return error.InvalidWireType,\n", .{ wire, escaped, types.scalar_decode_expr(s) });
+                        try e.print_raw(" if (field.value == {s})", .{wire});
+                        try e.open_brace();
+                        try emit_free_old_scalar(e, field.label, escaped, s);
+                        try e.print("result.{f} = try allocator.dupe(u8, {s});\n", .{ escaped, types.scalar_decode_expr(s) });
+                        e.indent_level -= 1;
+                        try e.print("}} else return error.InvalidWireType,\n", .{});
                     } else {
                         try e.print_raw(" if (field.value == {s}) {{ result.{f} = {s}; }} else return error.InvalidWireType,\n", .{ wire, escaped, types.scalar_decode_expr(s) });
                     }
@@ -1908,8 +1914,8 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField, syntax: ast.Syntax
     try e.close_brace_nosemi(); // while
 
     switch (map_field.value_type) {
-        .named => try e.print("try result.{f}.put(allocator, entry_key, entry_val orelse .{{}});\n", .{escaped}),
-        else => try e.print("try result.{f}.put(allocator, entry_key, entry_val);\n", .{escaped}),
+        .named => try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "entry_key", "entry_val orelse .{}"),
+        else => try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "entry_key", "entry_val"),
     }
     e.indent_level -= 1;
     try e.print("}} else return error.InvalidWireType,\n", .{});
@@ -2088,6 +2094,49 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
             try e.print("}} else return error.InvalidWireType,\n", .{});
         },
     }
+}
+
+/// Emit code to free the old value of a scalar string/bytes field before overwriting it.
+/// This handles duplicate fields in binary/text format (last value wins, but old must be freed).
+fn emit_free_old_scalar(e: *Emitter, label: ast.FieldLabel, escaped: types.EscapedName, s: ast.ScalarType) !void {
+    if (s != .string and s != .bytes) return;
+    switch (label) {
+        .implicit, .required => {
+            try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
+        },
+        .optional => {
+            try e.print("if (result.{f}) |_old| allocator.free(_old);\n", .{escaped});
+        },
+        .repeated => {},
+    }
+}
+
+/// Emit code to put a key/value into a map, freeing old entries on duplicate keys.
+/// Uses getOrPut to detect duplicates and properly clean up old key/value.
+fn emit_map_put_with_free(e: *Emitter, escaped: types.EscapedName, key_type: ast.ScalarType, value_type: ast.TypeRef, key_expr: []const u8, val_expr: []const u8) !void {
+    try e.print("const _gop = try result.{f}.getOrPut(allocator, {s});\n", .{ escaped, key_expr });
+    try e.print("if (_gop.found_existing)", .{});
+    try e.open_brace();
+    // Free the duplicate new key if string (old key stays in the map)
+    if (types.is_string_key(key_type)) {
+        try e.print("allocator.free({s});\n", .{key_expr});
+    }
+    // Free the old value being replaced
+    switch (value_type) {
+        .scalar => |s| {
+            if (s == .string or s == .bytes) {
+                try e.print("if (_gop.value_ptr.*.len > 0) allocator.free(_gop.value_ptr.*);\n", .{});
+            }
+        },
+        .named => {
+            try e.print("_gop.value_ptr.deinit(allocator);\n", .{});
+        },
+        .enum_ref => {},
+    }
+    try e.close_brace_nosemi();
+    // For non-found case with getOrPut, key is already stored
+    try e.print("\n", .{});
+    try e.print("_gop.value_ptr.* = {s};\n", .{val_expr});
 }
 
 // ── Deinit Method ─────────────────────────────────────────────────────
@@ -4127,10 +4176,14 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     }
     switch (map_field.value_type) {
         .enum_ref => {
-            try e.print("if (map_val_opt) |map_val| try result.{f}.put(allocator, map_key, map_val);\n", .{escaped});
+            try e.print("if (map_val_opt) |map_val|", .{});
+            try e.open_brace();
+            try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "map_key", "map_val");
+            try e.close_brace_nosemi();
+            try e.print("\n", .{});
         },
         else => {
-            try e.print("try result.{f}.put(allocator, map_key, map_val);\n", .{escaped});
+            try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "map_key", "map_val");
         },
     }
 
@@ -4885,11 +4938,18 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                         e.indent_level += 1;
                         try e.print("const _sv = try text_format.{s}(scanner);\n", .{read_fn});
                         try e.print("try text_format.validate_utf8(_sv);\n", .{});
+                        try emit_free_old_scalar(e, field.label, escaped, s);
                         try e.print("result.{f} = try allocator.dupe(u8, _sv);\n", .{escaped});
                         e.indent_level -= 1;
                         try e.print("}}\n", .{});
                     } else if (s == .bytes) {
-                        try e.print("result.{f} = try allocator.dupe(u8, try text_format.{s}(scanner));\n", .{ escaped, read_fn });
+                        try e.print("{{\n", .{});
+                        e.indent_level += 1;
+                        try e.print("const _bv = try text_format.{s}(scanner);\n", .{read_fn});
+                        try emit_free_old_scalar(e, field.label, escaped, s);
+                        try e.print("result.{f} = try allocator.dupe(u8, _bv);\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}}\n", .{});
                     } else {
                         try e.print("result.{f} = try text_format.{s}(scanner);\n", .{ escaped, read_fn });
                     }
@@ -4912,13 +4972,20 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                         try e.print("{{\n", .{});
                         e.indent_level += 1;
                         try e.print("const val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+                        try e.print("if (result.{f}) |old_ptr| {{ old_ptr.deinit(allocator); allocator.destroy(old_ptr); }}\n", .{escaped});
                         try e.print("const ptr = try allocator.create({s});\n", .{name});
                         try e.print("ptr.* = val;\n", .{});
                         try e.print("result.{f} = ptr;\n", .{escaped});
                         e.indent_level -= 1;
                         try e.print("}}\n", .{});
                     } else {
-                        try e.print("result.{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, name });
+                        try e.print("{{\n", .{});
+                        e.indent_level += 1;
+                        try e.print("const val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+                        try e.print("if (result.{f}) |*_old| _old.deinit(allocator);\n", .{escaped});
+                        try e.print("result.{f} = val;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}}\n", .{});
                     }
                     try emit_text_expect_close_brace_or_angle(e);
                 },
@@ -4928,7 +4995,13 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                     if (std.mem.eql(u8, name, "google.protobuf.Any")) {
                         try emit_from_text_any_shorthand_field(e, escaped, full_name);
                     } else {
-                        try e.print("result.{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, name });
+                        try e.print("{{\n", .{});
+                        e.indent_level += 1;
+                        try e.print("const val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+                        try e.print("result.{f}.deinit(allocator);\n", .{escaped});
+                        try e.print("result.{f} = val;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}}\n", .{});
                     }
                     try emit_text_expect_close_brace_or_angle(e);
                 },
@@ -5248,19 +5321,17 @@ fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
 
-    // Put key/value into map
-    try e.print("if (map_key) |k| {{\n", .{});
-    e.indent_level += 1;
-    try e.print("try result.{f}.put(allocator, k, map_val orelse ", .{escaped});
-    // Default value for map values
+    // Put key/value into map, freeing old entries on duplicate keys
+    try e.print("if (map_key) |k|", .{});
+    try e.open_brace();
     switch (map_field.value_type) {
-        .scalar => |s| try e.print_raw("{s}", .{types.scalar_default_value(s)}),
-        .named => try e.print_raw("undefined", .{}),
-        .enum_ref => try e.print_raw("@enumFromInt(0)", .{}),
+        .scalar => |s| try e.print("const v = map_val orelse {s};\n", .{types.scalar_default_value(s)}),
+        .named => |nname| try e.print("const v: {s} = map_val orelse .{{}};\n", .{nname}),
+        .enum_ref => |ename| try e.print("const v: {s} = map_val orelse @enumFromInt(0);\n", .{ename}),
     }
-    try e.print_raw(");\n", .{});
-    e.indent_level -= 1;
-    try e.print("}}\n", .{});
+    try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "k", "v");
+    try e.close_brace_nosemi();
+    try e.print("\n", .{});
 
     e.indent_level -= 1;
     try e.print("}}", .{});
