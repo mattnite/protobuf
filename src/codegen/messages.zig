@@ -640,6 +640,7 @@ fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax, r
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
     }
     try e.print("while (try iter.next()) |field|", .{});
     try e.open_brace();
@@ -732,6 +733,7 @@ fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax, rec
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
         try e.print("var seen_fields: std.StringHashMapUnmanaged(void) = .{{}};\n", .{});
         try e.print("defer seen_fields.deinit(allocator);\n", .{});
     }
@@ -1621,6 +1623,7 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, recursi
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
 
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("var unknown_writer: std.Io.Writer.Allocating = .init(allocator);\n", .{});
     try e.print("defer unknown_writer.deinit();\n", .{});
     try e.print("var iter = message.iterate_fields(bytes);\n", .{});
@@ -2307,6 +2310,7 @@ fn emit_wrapper_from_json_method(e: *Emitter, kind: WrapperKind) !void {
         else => try e.print("_ = allocator;\n", .{}),
     }
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const maybe_tok = try scanner.peek() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (maybe_tok == .null_value) {{ _ = try scanner.next(); return result; }}\n", .{});
     switch (kind) {
@@ -2371,6 +2375,7 @@ fn emit_timestamp_from_json_method(e: *Emitter) !void {
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("_ = allocator;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("if (try json.read_timestamp_value(scanner)) |ts| {{ result.seconds = ts.seconds; result.nanos = ts.nanos; }}\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi();
@@ -2399,6 +2404,7 @@ fn emit_duration_from_json_method(e: *Emitter) !void {
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("_ = allocator;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("if (try json.read_duration_value(scanner)) |dur| {{ result.seconds = dur.seconds; result.nanos = dur.nanos; }}\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi();
@@ -2426,6 +2432,7 @@ fn emit_field_mask_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("result.paths = try json.read_field_mask_paths(scanner, allocator);\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi();
@@ -2655,6 +2662,7 @@ fn emit_any_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("var seen_fields: std.StringHashMapUnmanaged(void) = .{{}};\n", .{});
     try e.print("defer seen_fields.deinit(allocator);\n", .{});
     try e.print("var payload_entries: std.ArrayListUnmanaged(struct {{ key: []const u8, value_json: []const u8 }}) = .empty;\n", .{});
@@ -2979,6 +2987,7 @@ fn emit_struct_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (start_tok == .null_value) return result;\n", .{});
     try e.print("if (start_tok != .object_start) return error.UnexpectedToken;\n", .{});
@@ -3041,6 +3050,7 @@ fn emit_list_value_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (start_tok == .null_value) return result;\n", .{});
     try e.print("if (start_tok != .array_start) return error.UnexpectedToken;\n", .{});
@@ -3099,6 +3109,7 @@ fn emit_value_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const tok = try scanner.peek() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("switch (tok) {{\n", .{});
     e.indent_level += 1;
@@ -3718,6 +3729,7 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
         try e.print("var seen_fields: std.StringHashMapUnmanaged(void) = .{{}};\n", .{});
         try e.print("defer seen_fields.deinit(allocator);\n", .{});
     }
@@ -4772,6 +4784,7 @@ fn emit_from_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
     }
 
     // Loop over tokens
@@ -5382,6 +5395,7 @@ fn emit_group_from_text_method(e: *Emitter, group: ast.Group, recursive_types: *
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
     }
     try e.print("while (try scanner.peek()) |tok|", .{});
     try e.open_brace();
