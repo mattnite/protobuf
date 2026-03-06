@@ -4225,7 +4225,11 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
             try e.open_brace();
             try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "map_key", "map_val");
             try e.close_brace_nosemi();
-            try e.print("\n", .{});
+            if (types.is_string_key(map_field.key_type)) {
+                try e.print(" else {{ allocator.free(map_key); }}\n", .{});
+            } else {
+                try e.print("\n", .{});
+            }
         },
         else => {
             try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "map_key", "map_val");
