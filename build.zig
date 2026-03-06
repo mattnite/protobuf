@@ -83,19 +83,20 @@ pub fn build(b: *std.Build) void {
     if (fuzz_target) |ft| {
         const fuzz_options = b.addOptions();
         fuzz_options.addOption([]const u8, "fuzz_target", ft);
-        fuzz_options.addOption(bool, "replay", false);
+
+        const fuzz_harness_mod = b.createModule(.{
+            .root_source_file = b.path("src/fuzz_harness.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "protobuf", .module = protobuf_mod },
+                .{ .name = "build_options", .module = fuzz_options.createModule() },
+            },
+        });
 
         const fuzz_obj = b.addObject(.{
             .name = "protobuf-fuzz",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/fuzz_harness.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "protobuf", .module = protobuf_mod },
-                    .{ .name = "build_options", .module = fuzz_options.createModule() },
-                },
-            }),
+            .root_module = fuzz_harness_mod,
         });
         fuzz_obj.root_module.stack_check = false;
         fuzz_obj.root_module.link_libc = true;
@@ -110,19 +111,14 @@ pub fn build(b: *std.Build) void {
         } else |_| {}
 
         // Plain replay binary (no AFL instrumentation) for crash triage
-        const replay_options = b.addOptions();
-        replay_options.addOption([]const u8, "fuzz_target", ft);
-        replay_options.addOption(bool, "replay", true);
-
         const replay_exe = b.addExecutable(.{
             .name = "fuzz-replay",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/fuzz_harness.zig"),
+                .root_source_file = b.path("src/fuzz_replay.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "protobuf", .module = protobuf_mod },
-                    .{ .name = "build_options", .module = replay_options.createModule() },
+                    .{ .name = "fuzz_harness", .module = fuzz_harness_mod },
                 },
             }),
         });
