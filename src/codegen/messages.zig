@@ -633,10 +633,10 @@ fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax, r
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
 
-    if (!group_fields_need_allocator(group)) {
-        try e.print("_ = allocator;\n", .{});
-    }
     if (group.fields.len == 0) {
+        if (!group_fields_need_allocator(group)) {
+            try e.print("_ = allocator;\n", .{});
+        }
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
@@ -2305,10 +2305,6 @@ fn emit_wrapper_from_json_method(e: *Emitter, kind: WrapperKind) !void {
     try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *json.JsonScanner, depth_remaining: usize) !@This()", .{});
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
-    switch (kind) {
-        .string_value, .bytes_value => {},
-        else => try e.print("_ = allocator;\n", .{}),
-    }
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const maybe_tok = try scanner.peek() orelse return error.UnexpectedEndOfInput;\n", .{});
@@ -2373,7 +2369,6 @@ fn emit_timestamp_from_json_method(e: *Emitter) !void {
     try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *json.JsonScanner, depth_remaining: usize) !@This()", .{});
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
-    try e.print("_ = allocator;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("if (try json.read_timestamp_value(scanner)) |ts| {{ result.seconds = ts.seconds; result.nanos = ts.nanos; }}\n", .{});
@@ -2402,7 +2397,6 @@ fn emit_duration_from_json_method(e: *Emitter) !void {
     try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *json.JsonScanner, depth_remaining: usize) !@This()", .{});
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
-    try e.print("_ = allocator;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("if (try json.read_duration_value(scanner)) |dur| {{ result.seconds = dur.seconds; result.nanos = dur.nanos; }}\n", .{});
@@ -4777,10 +4771,10 @@ fn emit_from_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
     const items = try collect_all_fields(e.allocator, msg);
     defer e.allocator.free(items);
 
-    if (!msg_fields_need_allocator(msg)) {
-        try e.print("_ = allocator;\n", .{});
-    }
     if (items.len == 0) {
+        if (!msg_fields_need_allocator(msg)) {
+            try e.print("_ = allocator;\n", .{});
+        }
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
@@ -5388,10 +5382,10 @@ fn emit_group_from_text_method(e: *Emitter, group: ast.Group, recursive_types: *
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
 
-    if (!group_fields_need_allocator(group)) {
-        try e.print("_ = allocator;\n", .{});
-    }
     if (group.fields.len == 0) {
+        if (!group_fields_need_allocator(group)) {
+            try e.print("_ = allocator;\n", .{});
+        }
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
