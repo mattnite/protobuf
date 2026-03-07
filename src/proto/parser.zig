@@ -958,7 +958,8 @@ pub const Parser = struct {
             }
         }
         // Return the raw text between the braces
-        const end = self.lexer.pos - 1; // before the closing brace
+        const end = self.lexer.pos -| 1; // before the closing brace
+        if (end <= start) return "";
         return self.lexer.source[start..end];
     }
 
