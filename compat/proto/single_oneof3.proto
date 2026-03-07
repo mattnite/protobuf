@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+message FileRequest {
+    uint32 id = 1;
+    string path = 2;
+}
+
+message ClientMessage {
+    oneof msg {
+        FileRequest request = 1;
+    }
+}

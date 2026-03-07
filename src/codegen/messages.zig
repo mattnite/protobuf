@@ -2076,7 +2076,9 @@ fn emit_decode_oneof_field_case(e: *Emitter, field: ast.Field, oneof: ast.Oneof,
             try e.print("existing.deinit(allocator);\n", .{});
             try e.print("existing.* = merged_val;\n", .{});
             try e.close_brace_comma();
-            try e.print("else => result.{f} = .{{ .{f} = try {s}.decode_inner(allocator, field.value.len, depth_remaining - 1) }},\n", .{ oneof_escaped, field_escaped, name });
+            if (oneof.fields.len > 1) {
+                try e.print("else => result.{f} = .{{ .{f} = try {s}.decode_inner(allocator, field.value.len, depth_remaining - 1) }},\n", .{ oneof_escaped, field_escaped, name });
+            }
             try e.close_brace_nosemi(); // switch
             try e.close_brace_nosemi(); // if result.oneof
             try e.print("else result.{f} = .{{ .{f} = try {s}.decode_inner(allocator, field.value.len, depth_remaining - 1) }};\n", .{ oneof_escaped, field_escaped, name });
