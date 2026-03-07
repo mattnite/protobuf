@@ -226,6 +226,10 @@ test "protoc plugin: oneof3.proto matches standalone" {
     try run_comparison_test("oneof3.proto");
 }
 
+test "protoc plugin: single_oneof3.proto matches standalone" {
+    try run_comparison_test("single_oneof3.proto");
+}
+
 test "protoc plugin: repeated3.proto matches standalone" {
     try run_comparison_test("repeated3.proto");
 }

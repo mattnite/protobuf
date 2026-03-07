@@ -30,6 +30,8 @@ const DefaultMessage = proto.default2.DefaultMessage;
 const DefaultColor = proto.default2.DefaultColor;
 const ExtBase = proto.extension2.ExtBase;
 const GroupMessage = proto.group2.GroupMessage;
+const SingleOneofMessage = proto.single_oneof3.ClientMessage;
+const FileRequest = proto.single_oneof3.FileRequest;
 const TextMessage = proto.text3.TextMessage;
 const SubMessage = proto.text3.SubMessage;
 const TextEnum = proto.text3.TextEnum;
@@ -568,6 +570,34 @@ test "oneof3: write Zig test vectors" {
     };
 
     try write_test_vectors(OneofMessage, &cases, "testdata/zig/oneof3.bin");
+}
+
+// ── SingleOneof3 Tests ────────────────────────────────────────────────
+
+test "single_oneof3: decode round-trip - none set" {
+    const msg = SingleOneofMessage{};
+    const data = try encode_to_buf(SingleOneofMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(SingleOneofMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?SingleOneofMessage.Msg, null), decoded.msg);
+}
+
+test "single_oneof3: decode round-trip - message variant set" {
+    const msg = SingleOneofMessage{
+        .msg = .{ .request = .{ .id = 42, .path = "/tmp/test.txt" } },
+    };
+    const data = try encode_to_buf(SingleOneofMessage, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(SingleOneofMessage, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expect(decoded.msg != null);
+    try testing.expectEqual(@as(u32, 42), decoded.msg.?.request.id);
+    try testing.expectEqualStrings("/tmp/test.txt", decoded.msg.?.request.path);
 }
 
 // ── Repeated3 Tests ───────────────────────────────────────────────────

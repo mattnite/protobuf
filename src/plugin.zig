@@ -84,6 +84,7 @@ const FieldDescriptorProto = struct {
     oneof_index: i32 = -1, // -1 means not in a oneof
     json_name: []const u8 = "",
     options: ?FieldOptions = null,
+    proto3_optional: bool = false,
 };
 
 const DescriptorProto = struct {
@@ -273,6 +274,7 @@ fn decode_field(data: []const u8) DecodeError!FieldDescriptorProto {
             8 => result.options = try decode_field_options(field.value.len),
             9 => result.oneof_index = varint_as_i32(field.value.varint),
             10 => result.json_name = field.value.len,
+            17 => result.proto3_optional = field.value.varint != 0,
             else => {},
         }
     }
@@ -502,14 +504,11 @@ fn convert_service(allocator: std.mem.Allocator, desc: ServiceDescriptorProto, p
 }
 
 fn convert_message(allocator: std.mem.Allocator, desc: DescriptorProto, package: []const u8, syntax: ast.Syntax) !ast.Message {
-    // Count fields per oneof_index to detect synthetic oneofs (proto3 optional)
-    var oneof_field_counts: std.ArrayListUnmanaged(u32) = .empty;
-    for (0..desc.oneof_decl.len) |_| {
-        try oneof_field_counts.append(allocator, 0);
-    }
+    // Identify synthetic oneofs (proto3 optional) by checking proto3_optional flag
+    var synthetic_oneof_indices = std.AutoArrayHashMapUnmanaged(usize, void){};
     for (desc.field) |f| {
-        if (f.oneof_index >= 0 and @as(usize, @intCast(f.oneof_index)) < oneof_field_counts.items.len) {
-            oneof_field_counts.items[@intCast(f.oneof_index)] += 1;
+        if (f.proto3_optional and f.oneof_index >= 0) {
+            try synthetic_oneof_indices.put(allocator, @intCast(f.oneof_index), {});
         }
     }
 
@@ -574,7 +573,7 @@ fn convert_message(allocator: std.mem.Allocator, desc: DescriptorProto, package:
         const label: ast.FieldLabel = blk: {
             if (f.oneof_index >= 0) {
                 const oi: usize = @intCast(f.oneof_index);
-                if (oi < oneof_field_counts.items.len and oneof_field_counts.items[oi] == 1) {
+                if (synthetic_oneof_indices.get(oi) != null) {
                     // Synthetic oneof (proto3 optional) — mark as optional
                     break :blk .optional;
                 }
@@ -623,7 +622,7 @@ fn convert_message(allocator: std.mem.Allocator, desc: DescriptorProto, package:
         // Check if field belongs to a real oneof
         if (f.oneof_index >= 0) {
             const oi: usize = @intCast(f.oneof_index);
-            if (oi < oneof_field_counts.items.len and oneof_field_counts.items[oi] > 1) {
+            if (synthetic_oneof_indices.get(oi) == null) {
                 // Real oneof member
                 const entry = try oneof_fields_map.getOrPut(allocator, oi);
                 if (!entry.found_existing) {
@@ -640,8 +639,8 @@ fn convert_message(allocator: std.mem.Allocator, desc: DescriptorProto, package:
     // Convert real oneofs
     var oneofs: std.ArrayListUnmanaged(ast.Oneof) = .empty;
     for (desc.oneof_decl, 0..) |od, oi| {
-        // Skip synthetic oneofs (single member)
-        if (oi < oneof_field_counts.items.len and oneof_field_counts.items[oi] <= 1) continue;
+        // Skip synthetic oneofs (proto3 optional)
+        if (synthetic_oneof_indices.get(oi) != null) continue;
 
         const oneof_fields_list = oneof_fields_map.getPtr(oi);
         const oneof_field_slice = if (oneof_fields_list) |l|
@@ -1317,7 +1316,7 @@ test "convert_file: proto3 optional (synthetic oneof)" {
     // Proto3 optional: field with oneof_index pointing to a synthetic oneof (1 member)
     const fields = [_]FieldDescriptorProto{
         .{ .name = "name", .number = 1, .label = 1, .@"type" = 9 }, // regular
-        .{ .name = "nickname", .number = 2, .label = 1, .@"type" = 9, .oneof_index = 0 }, // synthetic oneof
+        .{ .name = "nickname", .number = 2, .label = 1, .@"type" = 9, .oneof_index = 0, .proto3_optional = true }, // synthetic oneof
     };
     const oneofs = [_]OneofDescriptorProto{
         .{ .name = "_nickname" },
