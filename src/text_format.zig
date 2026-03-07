@@ -600,7 +600,7 @@ pub const TextScanner = struct {
                     },
                     '0'...'7' => {
                         // Octal escape
-                        var val: u8 = raw[i] - '0';
+                        var val: u16 = raw[i] - '0';
                         i += 1;
                         if (i < raw.len and raw[i] >= '0' and raw[i] <= '7') {
                             val = val * 8 + (raw[i] - '0');
@@ -610,7 +610,10 @@ pub const TextScanner = struct {
                                 i += 1;
                             }
                         }
-                        result[out] = val;
+                        result[out] = std.math.cast(u8, val) orelse {
+                            self.allocator.free(result);
+                            return TextError.InvalidEscape;
+                        };
                         out += 1;
                     },
                     else => {
