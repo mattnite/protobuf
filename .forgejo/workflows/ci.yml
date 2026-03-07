@@ -88,7 +88,7 @@ jobs:
         if: steps.cache-conformance.outputs.cache-hit != 'true'
         run: |
           apt-get update && apt-get install -y curl cmake g++
-          git clone --depth=1 --branch ${{ env.PROTOBUF_VERSION }} https://github.com/protocolbuffers/protobuf /tmp/protobuf
+          git clone --depth=1 --recurse-submodules --shallow-submodules --branch ${{ env.PROTOBUF_VERSION }} https://github.com/protocolbuffers/protobuf /tmp/protobuf
           cmake -S /tmp/protobuf -B /tmp/protobuf/build -Dprotobuf_BUILD_CONFORMANCE=ON -Dprotobuf_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/protobuf/build --target conformance_test_runner -j$(nproc)
           cp /tmp/protobuf/build/conformance_test_runner /tmp/conformance_test_runner
