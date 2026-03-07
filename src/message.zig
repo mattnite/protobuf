@@ -118,7 +118,7 @@ pub fn skip_field(data: []const u8, pos: *usize, wire_type: encoding.WireType) E
         .i32 => _ = try read_fixed_slice(4, data, pos),
         .len => {
             const len = std.math.cast(usize, try decode_varint_slice(data, pos)) orelse return error.Overflow;
-            if (len > data.len - pos.*) return error.EndOfStream;
+            if (pos.* > data.len or len > data.len - pos.*) return error.EndOfStream;
             pos.* += len;
         },
         .sgroup => |_| return error.InvalidWireType,
