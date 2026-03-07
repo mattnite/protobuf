@@ -165,7 +165,7 @@ pub fn tag_size(field_number: u29) u4 {
 
 /// Encode a length-delimited byte slice (length prefix + data)
 pub fn encode_len(w: *std.Io.Writer, data: []const u8) std.Io.Writer.Error!void {
-    try encode_varint(w, @intCast(data.len));
+    try encode_varint(w, @as(u64, data.len));
     try w.writeAll(data);
 }
 

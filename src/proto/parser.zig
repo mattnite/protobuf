@@ -1009,20 +1009,14 @@ pub const Parser = struct {
         // or if the current token IS the type.
         // Peek at the token after the potential label.
         // Save state and do a lookahead.
-        const saved_peeked = self.lexer.peeked;
-        const saved_pos = self.lexer.pos;
-        const saved_line = self.lexer.line;
-        const saved_col = self.lexer.column;
+        const state = self.lexer.save();
 
         // Consume the label candidate
         _ = try self.lexer.next();
         const after_label = try self.lexer.peek();
 
         // Restore state
-        self.lexer.peeked = saved_peeked;
-        self.lexer.pos = saved_pos;
-        self.lexer.line = saved_line;
-        self.lexer.column = saved_col;
+        self.lexer.restore(state);
 
         // If the next token after the label is a type-starting token, it's a label
         // Types start with: identifier (type name or scalar), dot (qualified name)
@@ -1031,18 +1025,12 @@ pub const Parser = struct {
 
     fn is_group_coming(self: *Parser) !bool {
         // Current token is a label keyword. Check if the token after it is "group".
-        const saved_peeked = self.lexer.peeked;
-        const saved_pos = self.lexer.pos;
-        const saved_line = self.lexer.line;
-        const saved_col = self.lexer.column;
+        const state = self.lexer.save();
 
         _ = try self.lexer.next(); // consume label
         const after = try self.lexer.peek();
 
-        self.lexer.peeked = saved_peeked;
-        self.lexer.pos = saved_pos;
-        self.lexer.line = saved_line;
-        self.lexer.column = saved_col;
+        self.lexer.restore(state);
 
         return after.kind == .identifier and std.mem.eql(u8, after.text, "group");
     }
