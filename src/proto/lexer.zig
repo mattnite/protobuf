@@ -60,6 +60,24 @@ pub const Lexer = struct {
     column: u32,
     peeked: ?Token,
 
+    pub const State = struct {
+        pos: usize,
+        line: u32,
+        column: u32,
+        peeked: ?Token,
+    };
+
+    pub fn save(self: Lexer) State {
+        return .{ .pos = self.pos, .line = self.line, .column = self.column, .peeked = self.peeked };
+    }
+
+    pub fn restore(self: *Lexer, state: State) void {
+        self.pos = state.pos;
+        self.line = state.line;
+        self.column = state.column;
+        self.peeked = state.peeked;
+    }
+
     /// Create a lexer over the given .proto source text
     pub fn init(source: []const u8, file_name: []const u8) Lexer {
         return .{

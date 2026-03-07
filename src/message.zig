@@ -194,7 +194,7 @@ pub const MessageWriter = struct {
     /// Used for nested messages where the data is written separately via encode().
     pub fn write_len_prefix(self: MessageWriter, field_number: u29, data_len: usize) std.Io.Writer.Error!void {
         try encoding.encode_tag(self.writer, .{ .field_number = field_number, .wire_type = .len });
-        try encoding.encode_varint(self.writer, @intCast(data_len));
+        try encoding.encode_varint(self.writer, @as(u64, data_len));
     }
 
     /// Write a start-group tag for a group field.
@@ -280,7 +280,7 @@ pub fn i64_field_size(field_number: u29) usize {
 
 /// Return the total encoded size of a length-delimited field
 pub fn len_field_size(field_number: u29, data_len: usize) usize {
-    return @as(usize, encoding.tag_size(field_number)) + @as(usize, encoding.varint_size(@intCast(data_len))) + data_len;
+    return @as(usize, encoding.tag_size(field_number)) + @as(usize, encoding.varint_size(@as(u64, data_len))) + data_len;
 }
 
 /// Return the encoded size of a start-group tag
