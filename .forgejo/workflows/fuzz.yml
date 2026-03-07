@@ -2,7 +2,7 @@ name: Fuzz
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -19,8 +19,8 @@ jobs:
         uses: https://git.ts.mattnite.net/mattnite/cairn/actions/cairn-zig-fuzz-afl@main
         with:
           cairn_server: ${{ secrets.CAIRN_SERVER_URL }}
-          repo: ${{ github.event.repository.name }}
-          owner: ${{ github.repository_owner }}
+          repo: protobuf
+          owner: mattnite
           targets: |
             lexer
             resolve_string
