@@ -355,7 +355,7 @@ src/
 
 ## Requirements
 
-Zig 0.15.2 or later.
+Zig 0.15.2
 
 ## License
 
