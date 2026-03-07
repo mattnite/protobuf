@@ -90,7 +90,7 @@ pub const FieldIterator = struct {
             .i32 => .{ .i32 = std.mem.littleToNative(u32, @bitCast(try read_fixed_slice(4, self.data, &self.pos))) },
             .len => blk: {
                 const len = std.math.cast(usize, try decode_varint_slice(self.data, &self.pos)) orelse return error.Overflow;
-                if (len > self.data.len - self.pos) return error.EndOfStream;
+                if (self.pos > self.data.len or len > self.data.len - self.pos) return error.EndOfStream;
                 const slice = self.data[self.pos..][0..len];
                 self.pos += len;
                 break :blk .{ .len = slice };
