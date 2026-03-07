@@ -954,11 +954,11 @@ pub const Parser = struct {
             if (tok.kind == .close_brace) depth -= 1;
             if (tok.kind == .eof) {
                 try self.add_error(tok.location, "unexpected EOF in aggregate");
-                break;
+                return "";
             }
         }
-        // Return the raw text between the braces
-        const end = self.lexer.pos -| 1; // before the closing brace
+        // Return the raw text between the braces (pos is past '}', so pos-1 is at '}')
+        const end = self.lexer.pos -| 1;
         if (end <= start) return "";
         return self.lexer.source[start..end];
     }
