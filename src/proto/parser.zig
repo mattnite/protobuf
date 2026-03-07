@@ -895,7 +895,12 @@ pub const Parser = struct {
             if (next.kind == .integer) {
                 _ = try self.lexer.next();
                 const val = try parse_int(next.text);
-                return .{ .integer = -@as(i64, @intCast(val)) };
+                const int_val = std.math.cast(i64, val) orelse {
+                    // val == 2^63: the only u64 value > i64 max that is valid when negated
+                    if (val == @as(u64, 1) << 63) return .{ .integer = std.math.minInt(i64) };
+                    return error.Overflow;
+                };
+                return .{ .integer = -int_val };
             }
             if (next.kind == .float_literal) {
                 _ = try self.lexer.next();
