@@ -1717,18 +1717,36 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         // Packed encoding case
                         try e.print(".len => |packed_data|", .{});
                         try e.open_brace();
-                        try e.print("var count: usize = 0;\n", .{});
-                        try e.print("var count_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
-                        try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
-                        try e.print("const old = result.{f};\n", .{escaped});
-                        try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                        const cat = types.scalar_packed_category(s);
+                        switch (cat) {
+                            .fixed32 => {
+                                try e.print("if (packed_data.len % 4 != 0) return error.InvalidWireType;\n", .{});
+                                try e.print("const count = packed_data.len / 4;\n", .{});
+                                try e.print("const old = result.{f};\n", .{escaped});
+                                try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                            },
+                            .fixed64 => {
+                                try e.print("if (packed_data.len % 8 != 0) return error.InvalidWireType;\n", .{});
+                                try e.print("const count = packed_data.len / 8;\n", .{});
+                                try e.print("const old = result.{f};\n", .{escaped});
+                                try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                            },
+                            .varint => {
+                                try e.print("const old = result.{f};\n", .{escaped});
+                                try e.print("const new = try allocator.alloc({s}, old.len + packed_data.len);\n", .{types.scalar_zig_type(s)});
+                            },
+                        }
                         try e.print("errdefer allocator.free(new);\n", .{});
                         try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         try e.print("var packed_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
                         try e.print("var idx: usize = old.len;\n", .{});
                         try e.print("while (try packed_iter.next()) |v| : (idx += 1) new[idx] = {s};\n", .{types.scalar_packed_decode_expr(s)});
                         try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                        try e.print("result.{f} = new;\n", .{escaped});
+                        if (cat == .varint) {
+                            try e.print("result.{f} = try allocator.realloc(new, idx);\n", .{escaped});
+                        } else {
+                            try e.print("result.{f} = new;\n", .{escaped});
+                        }
                         e.indent_level -= 1;
                         try e.print("}},\n", .{});
                         // Individual element case
@@ -1860,18 +1878,15 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                     // Packed encoding case
                     try e.print(".len => |packed_data|", .{});
                     try e.open_brace();
-                    try e.print("var count: usize = 0;\n", .{});
-                    try e.print("var count_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
-                    try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
                     try e.print("const old = result.{f};\n", .{escaped});
-                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + count);\n", .{});
+                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + packed_data.len);\n", .{});
                     try e.print("errdefer allocator.free(new);\n", .{});
                     try e.print("@memcpy(new[0..old.len], old);\n", .{});
                     try e.print("var packed_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
                     try e.print("var idx: usize = old.len;\n", .{});
                     try e.print("while (try packed_iter.next()) |v| : (idx += 1) new[idx] = {s};\n", .{packed_decode_expr});
                     try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                    try e.print("result.{f} = new;\n", .{escaped});
+                    try e.print("result.{f} = try allocator.realloc(new, idx);\n", .{escaped});
                     e.indent_level -= 1;
                     try e.print("}},\n", .{});
                     // Individual varint case

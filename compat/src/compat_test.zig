@@ -33,6 +33,7 @@ const GroupMessage = proto.group2.GroupMessage;
 const SingleOneofMessage = proto.single_oneof3.ClientMessage;
 const FileRequest = proto.single_oneof3.FileRequest;
 const TextMessage = proto.text3.TextMessage;
+const PackedScalars = proto.packed3.PackedScalars;
 const SubMessage = proto.text3.SubMessage;
 const TextEnum = proto.text3.TextEnum;
 
@@ -2728,4 +2729,177 @@ test "dynamic interop: dynamic encode → generated decode (map)" {
     try testing.expectEqual(@as(usize, 2), decoded.str_str.count());
     try testing.expectEqualStrings("1", decoded.str_str.get("a").?);
     try testing.expectEqualStrings("2", decoded.str_str.get("b").?);
+}
+
+// ── Packed3 Tests ─────────────────────────────────────────────────────
+
+test "packed3: encode/decode round-trip - empty" {
+    const msg = PackedScalars{};
+    const data = try encode_to_buf(PackedScalars, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(PackedScalars, data);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), decoded.f_fixed32.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_fixed64.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_sfixed32.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_sfixed64.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_uint32.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_uint64.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_sint32.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_sint64.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_float.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_int32.len);
+    try testing.expectEqual(@as(usize, 0), decoded.f_int64.len);
+}
+
+test "packed3: encode/decode round-trip - fixed32 fields" {
+    const msg = PackedScalars{
+        .f_fixed32 = &.{ 0, 1, 42, 0xFFFFFFFF },
+        .f_sfixed32 = &.{ -1, 0, 1, 2147483647, -2147483648 },
+        .f_float = &.{ 0.0, 1.5, -3.14, std.math.inf(f32), std.math.nan(f32) },
+    };
+
+    const data = try encode_to_buf(PackedScalars, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(PackedScalars, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), decoded.f_fixed32.len);
+    try testing.expectEqual(@as(u32, 0), decoded.f_fixed32[0]);
+    try testing.expectEqual(@as(u32, 1), decoded.f_fixed32[1]);
+    try testing.expectEqual(@as(u32, 42), decoded.f_fixed32[2]);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), decoded.f_fixed32[3]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_sfixed32.len);
+    try testing.expectEqual(@as(i32, -1), decoded.f_sfixed32[0]);
+    try testing.expectEqual(@as(i32, 0), decoded.f_sfixed32[1]);
+    try testing.expectEqual(@as(i32, 1), decoded.f_sfixed32[2]);
+    try testing.expectEqual(@as(i32, 2147483647), decoded.f_sfixed32[3]);
+    try testing.expectEqual(@as(i32, -2147483648), decoded.f_sfixed32[4]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_float.len);
+    try testing.expectEqual(@as(f32, 0.0), decoded.f_float[0]);
+    try testing.expectEqual(@as(f32, 1.5), decoded.f_float[1]);
+    try testing.expectEqual(@as(f32, -3.14), decoded.f_float[2]);
+    try testing.expect(std.math.isInf(decoded.f_float[3]));
+    try testing.expect(std.math.isNan(decoded.f_float[4]));
+}
+
+test "packed3: encode/decode round-trip - fixed64 fields" {
+    const msg = PackedScalars{
+        .f_fixed64 = &.{ 0, 1, 1000000, 0xFFFFFFFFFFFFFFFF },
+        .f_sfixed64 = &.{ -1, 0, 1, 9223372036854775807, -9223372036854775808 },
+    };
+
+    const data = try encode_to_buf(PackedScalars, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(PackedScalars, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 4), decoded.f_fixed64.len);
+    try testing.expectEqual(@as(u64, 0), decoded.f_fixed64[0]);
+    try testing.expectEqual(@as(u64, 1), decoded.f_fixed64[1]);
+    try testing.expectEqual(@as(u64, 1000000), decoded.f_fixed64[2]);
+    try testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFFF), decoded.f_fixed64[3]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_sfixed64.len);
+    try testing.expectEqual(@as(i64, -1), decoded.f_sfixed64[0]);
+    try testing.expectEqual(@as(i64, 0), decoded.f_sfixed64[1]);
+    try testing.expectEqual(@as(i64, 1), decoded.f_sfixed64[2]);
+    try testing.expectEqual(@as(i64, 9223372036854775807), decoded.f_sfixed64[3]);
+    try testing.expectEqual(@as(i64, -9223372036854775808), decoded.f_sfixed64[4]);
+}
+
+test "packed3: encode/decode round-trip - varint fields" {
+    const msg = PackedScalars{
+        .f_uint32 = &.{ 0, 1, 127, 128, 0xFFFFFFFF },
+        .f_uint64 = &.{ 0, 1, 0xFFFFFFFFFFFFFFFF },
+        .f_sint32 = &.{ 0, 1, -1, 2147483647, -2147483648 },
+        .f_sint64 = &.{ 0, 1, -1, 9223372036854775807, -9223372036854775808 },
+        .f_int32 = &.{ 0, 1, -1, 2147483647, -2147483648 },
+        .f_int64 = &.{ 0, 1, -1, 9223372036854775807, -9223372036854775808 },
+    };
+
+    const data = try encode_to_buf(PackedScalars, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(PackedScalars, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_uint32.len);
+    try testing.expectEqual(@as(u32, 0), decoded.f_uint32[0]);
+    try testing.expectEqual(@as(u32, 1), decoded.f_uint32[1]);
+    try testing.expectEqual(@as(u32, 127), decoded.f_uint32[2]);
+    try testing.expectEqual(@as(u32, 128), decoded.f_uint32[3]);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), decoded.f_uint32[4]);
+
+    try testing.expectEqual(@as(usize, 3), decoded.f_uint64.len);
+    try testing.expectEqual(@as(u64, 0), decoded.f_uint64[0]);
+    try testing.expectEqual(@as(u64, 1), decoded.f_uint64[1]);
+    try testing.expectEqual(@as(u64, 0xFFFFFFFFFFFFFFFF), decoded.f_uint64[2]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_sint32.len);
+    try testing.expectEqual(@as(i32, 0), decoded.f_sint32[0]);
+    try testing.expectEqual(@as(i32, 1), decoded.f_sint32[1]);
+    try testing.expectEqual(@as(i32, -1), decoded.f_sint32[2]);
+    try testing.expectEqual(@as(i32, 2147483647), decoded.f_sint32[3]);
+    try testing.expectEqual(@as(i32, -2147483648), decoded.f_sint32[4]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_sint64.len);
+    try testing.expectEqual(@as(i64, 0), decoded.f_sint64[0]);
+    try testing.expectEqual(@as(i64, 1), decoded.f_sint64[1]);
+    try testing.expectEqual(@as(i64, -1), decoded.f_sint64[2]);
+    try testing.expectEqual(@as(i64, 9223372036854775807), decoded.f_sint64[3]);
+    try testing.expectEqual(@as(i64, -9223372036854775808), decoded.f_sint64[4]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_int32.len);
+    try testing.expectEqual(@as(i32, 0), decoded.f_int32[0]);
+    try testing.expectEqual(@as(i32, 1), decoded.f_int32[1]);
+    try testing.expectEqual(@as(i32, -1), decoded.f_int32[2]);
+    try testing.expectEqual(@as(i32, 2147483647), decoded.f_int32[3]);
+    try testing.expectEqual(@as(i32, -2147483648), decoded.f_int32[4]);
+
+    try testing.expectEqual(@as(usize, 5), decoded.f_int64.len);
+    try testing.expectEqual(@as(i64, 0), decoded.f_int64[0]);
+    try testing.expectEqual(@as(i64, 1), decoded.f_int64[1]);
+    try testing.expectEqual(@as(i64, -1), decoded.f_int64[2]);
+    try testing.expectEqual(@as(i64, 9223372036854775807), decoded.f_int64[3]);
+    try testing.expectEqual(@as(i64, -9223372036854775808), decoded.f_int64[4]);
+}
+
+test "packed3: encode/decode round-trip - all fields populated" {
+    const msg = PackedScalars{
+        .f_fixed32 = &.{ 1, 2, 3 },
+        .f_fixed64 = &.{ 10, 20, 30 },
+        .f_sfixed32 = &.{ -1, 0, 1 },
+        .f_sfixed64 = &.{ -10, 0, 10 },
+        .f_uint32 = &.{ 100, 200 },
+        .f_uint64 = &.{ 1000, 2000 },
+        .f_sint32 = &.{ -50, 50 },
+        .f_sint64 = &.{ -500, 500 },
+        .f_float = &.{ 1.0, 2.0, 3.0 },
+        .f_int32 = &.{ -1, 0, 1 },
+        .f_int64 = &.{ -100, 0, 100 },
+    };
+
+    const data = try encode_to_buf(PackedScalars, msg);
+    defer testing.allocator.free(data);
+
+    var decoded = try decode_msg(PackedScalars, data);
+    defer decoded.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(u32, msg.f_fixed32, decoded.f_fixed32);
+    try testing.expectEqualSlices(u64, msg.f_fixed64, decoded.f_fixed64);
+    try testing.expectEqualSlices(i32, msg.f_sfixed32, decoded.f_sfixed32);
+    try testing.expectEqualSlices(i64, msg.f_sfixed64, decoded.f_sfixed64);
+    try testing.expectEqualSlices(u32, msg.f_uint32, decoded.f_uint32);
+    try testing.expectEqualSlices(u64, msg.f_uint64, decoded.f_uint64);
+    try testing.expectEqualSlices(i32, msg.f_sint32, decoded.f_sint32);
+    try testing.expectEqualSlices(i64, msg.f_sint64, decoded.f_sint64);
+    try testing.expectEqualSlices(f32, msg.f_float, decoded.f_float);
+    try testing.expectEqualSlices(i32, msg.f_int32, decoded.f_int32);
+    try testing.expectEqualSlices(i64, msg.f_int64, decoded.f_int64);
 }
