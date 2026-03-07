@@ -34,8 +34,8 @@ const FuzzTarget = enum {
 const active = std.meta.stringToEnum(FuzzTarget, @import("build_options").fuzz_target) orelse
     @compileError("unknown fuzz target: " ++ @import("build_options").fuzz_target);
 
-var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-var arena: std.heap.ArenaAllocator = undefined;
+pub var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+pub var arena: std.heap.ArenaAllocator = undefined;
 
 export fn zig_fuzz_init() void {
     arena = .init(gpa.allocator());
@@ -45,7 +45,10 @@ export fn zig_fuzz_test(buf: [*]u8, len_raw: isize) void {
     const len: usize = if (len_raw > 0) @intCast(len_raw) else 0;
     const input: []const u8 = if (len > 0) buf[0..len] else &.{};
     _ = arena.reset(.retain_capacity);
+    runFuzz(input);
+}
 
+pub fn runFuzz(input: []const u8) void {
     switch (active) {
         .lexer => fuzzLexer(input),
         .resolve_string => fuzzResolveString(input),

@@ -1,0 +1,7 @@
+int_val: 42
+neg_val: -100
+float_val: 3.14
+bool_val: true
+string_val: "hello\nworld"
+bytes_val: "\x00\x01\xff"
+enum_val: SOME_VALUE

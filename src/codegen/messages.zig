@@ -633,13 +633,14 @@ fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax, r
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
 
-    if (!group_fields_need_allocator(group)) {
-        try e.print("_ = allocator;\n", .{});
-    }
     if (group.fields.len == 0) {
+        if (!group_fields_need_allocator(group)) {
+            try e.print("_ = allocator;\n", .{});
+        }
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
     }
     try e.print("while (try iter.next()) |field|", .{});
     try e.open_brace();
@@ -685,7 +686,7 @@ fn emit_group_to_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax) !void
         try e.print("try json.write_object_start(writer);\n", .{});
         try e.print("var first = true;\n", .{});
         for (group.fields) |field| {
-            try emit_json_field(e, field, .proto2, "");
+            try emit_json_field(e, field, .proto2, "", &.{});
         }
         try e.print("try json.write_object_end(writer);\n", .{});
     } else {
@@ -732,6 +733,7 @@ fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax, rec
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
         try e.print("var seen_fields: std.StringHashMapUnmanaged(void) = .{{}};\n", .{});
         try e.print("defer seen_fields.deinit(allocator);\n", .{});
     }
@@ -766,7 +768,7 @@ fn emit_group_from_json_method(e: *Emitter, group: ast.Group, _: ast.Syntax, rec
     // Field matching
     var first_branch = true;
     for (group.fields) |field| {
-        try emit_from_json_field_branch(e, field, .proto2, &first_branch, recursive_types, "");
+        try emit_from_json_field_branch(e, field, .proto2, &first_branch, recursive_types, "", &.{});
     }
 
     // else: skip unknown
@@ -1621,6 +1623,7 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, recursi
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
 
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("var unknown_writer: std.Io.Writer.Allocating = .init(allocator);\n", .{});
     try e.print("defer unknown_writer.deinit();\n", .{});
     try e.print("var iter = message.iterate_fields(bytes);\n", .{});
@@ -1690,11 +1693,17 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         try e.print_raw(" if (field.value == {s})", .{wire});
                         try e.open_brace();
                         try e.print("try message.validate_utf8(field.value.len);\n", .{});
+                        try emit_free_old_scalar(e, field.label, escaped, s);
                         try e.print("result.{f} = try allocator.dupe(u8, field.value.len);\n", .{escaped});
                         e.indent_level -= 1;
                         try e.print("}} else return error.InvalidWireType,\n", .{});
                     } else if (s == .string or s == .bytes) {
-                        try e.print_raw(" if (field.value == {s}) {{ result.{f} = try allocator.dupe(u8, {s}); }} else return error.InvalidWireType,\n", .{ wire, escaped, types.scalar_decode_expr(s) });
+                        try e.print_raw(" if (field.value == {s})", .{wire});
+                        try e.open_brace();
+                        try emit_free_old_scalar(e, field.label, escaped, s);
+                        try e.print("result.{f} = try allocator.dupe(u8, {s});\n", .{ escaped, types.scalar_decode_expr(s) });
+                        e.indent_level -= 1;
+                        try e.print("}} else return error.InvalidWireType,\n", .{});
                     } else {
                         try e.print_raw(" if (field.value == {s}) {{ result.{f} = {s}; }} else return error.InvalidWireType,\n", .{ wire, escaped, types.scalar_decode_expr(s) });
                     }
@@ -1713,6 +1722,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
                         try e.print("const old = result.{f};\n", .{escaped});
                         try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                        try e.print("errdefer allocator.free(new);\n", .{});
                         try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         try e.print("var packed_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
                         try e.print("var idx: usize = old.len;\n", .{});
@@ -1742,6 +1752,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         try e.open_brace();
                         try e.print("const old = result.{f};\n", .{escaped});
                         try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
+                        try e.print("errdefer allocator.free(new);\n", .{});
                         try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         if (s == .string and syntax == .proto3) {
                             try e.print("try message.validate_utf8(field.value.len);\n", .{});
@@ -1824,6 +1835,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                     try e.open_brace();
                     try e.print("const old = result.{f};\n", .{escaped});
                     try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
+                    try e.print("errdefer allocator.free(new);\n", .{});
                     try e.print("@memcpy(new[0..old.len], old);\n", .{});
                     try e.print("new[old.len] = try @TypeOf(old[0]).decode_inner(allocator, field.value.len, depth_remaining - 1);\n", .{});
                     try e.print("if (old.len > 0) allocator.free(old);\n", .{});
@@ -1853,6 +1865,7 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                     try e.print("while (try count_iter.next()) |_| count += 1;\n", .{});
                     try e.print("const old = result.{f};\n", .{escaped});
                     try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + count);\n", .{});
+                    try e.print("errdefer allocator.free(new);\n", .{});
                     try e.print("@memcpy(new[0..old.len], old);\n", .{});
                     try e.print("var packed_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
                     try e.print("var idx: usize = old.len;\n", .{});
@@ -1893,6 +1906,7 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField, syntax: ast.Syntax
     // Declare key/value temporaries
     try emit_decode_map_key_decl(e, map_field.key_type);
     try emit_decode_map_value_decl(e, map_field.value_type);
+    try emit_decode_map_errdefer(e, map_field.key_type, map_field.value_type);
 
     try e.print("while (try entry_iter.next()) |entry|", .{});
     try e.open_brace();
@@ -1905,8 +1919,8 @@ fn emit_decode_map_case(e: *Emitter, map_field: ast.MapField, syntax: ast.Syntax
     try e.close_brace_nosemi(); // while
 
     switch (map_field.value_type) {
-        .named => try e.print("try result.{f}.put(allocator, entry_key, entry_val orelse .{{}});\n", .{escaped}),
-        else => try e.print("try result.{f}.put(allocator, entry_key, entry_val);\n", .{escaped}),
+        .named => try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "entry_key", "entry_val orelse .{}"),
+        else => try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "entry_key", "entry_val"),
     }
     e.indent_level -= 1;
     try e.print("}} else return error.InvalidWireType,\n", .{});
@@ -1937,6 +1951,23 @@ fn emit_decode_map_value_decl(e: *Emitter, value_type: ast.TypeRef) !void {
         .enum_ref => |name| {
             try e.print("var entry_val: {s} = @enumFromInt(0);\n", .{name});
         },
+    }
+}
+
+fn emit_decode_map_errdefer(e: *Emitter, key_type: ast.ScalarType, value_type: ast.TypeRef) !void {
+    if (key_type == .string) {
+        try e.print("errdefer {{ if (entry_key.len > 0) allocator.free(entry_key); }}\n", .{});
+    }
+    switch (value_type) {
+        .scalar => |s| {
+            if (s == .string or s == .bytes) {
+                try e.print("errdefer {{ if (entry_val.len > 0) allocator.free(entry_val); }}\n", .{});
+            }
+        },
+        .named => {
+            try e.print("errdefer {{ if (entry_val) |*v| v.deinit(allocator); }}\n", .{});
+        },
+        .enum_ref => {},
     }
 }
 
@@ -2077,6 +2108,7 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
             try e.open_brace();
             try e.print("const old = result.{f};\n", .{escaped});
             try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{grp.name});
+            try e.print("errdefer allocator.free(new);\n", .{});
             try e.print("@memcpy(new[0..old.len], old);\n", .{});
             try e.print("new[old.len] = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1);\n", .{ grp.name, num });
             try e.print("if (old.len > 0) allocator.free(old);\n", .{});
@@ -2085,6 +2117,64 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
             try e.print("}} else return error.InvalidWireType,\n", .{});
         },
     }
+}
+
+/// Emit code to free the old value of a scalar string/bytes field before overwriting it.
+/// This handles duplicate fields in binary/text format (last value wins, but old must be freed).
+fn emit_free_old_scalar(e: *Emitter, label: ast.FieldLabel, escaped: types.EscapedName, s: ast.ScalarType) !void {
+    if (s != .string and s != .bytes) return;
+    switch (label) {
+        .implicit, .required => {
+            try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
+        },
+        .optional => {
+            try e.print("if (result.{f}) |_old| allocator.free(_old);\n", .{escaped});
+        },
+        .repeated => {},
+    }
+}
+
+/// Emit code to put a key/value into a map, freeing old entries on duplicate keys.
+/// Uses getOrPut to detect duplicates and properly clean up old key/value.
+fn emit_map_put_with_free(e: *Emitter, escaped: types.EscapedName, key_type: ast.ScalarType, value_type: ast.TypeRef, key_expr: []const u8, val_expr: []const u8) !void {
+    try e.print("const _gop = try result.{f}.getOrPut(allocator, {s});\n", .{ escaped, key_expr });
+    try e.print("if (_gop.found_existing)", .{});
+    try e.open_brace();
+    // Free the duplicate new key if string (old key stays in the map)
+    if (types.is_string_key(key_type)) {
+        try e.print("allocator.free({s});\n", .{key_expr});
+    }
+    // Free the old value being replaced
+    switch (value_type) {
+        .scalar => |s| {
+            if (s == .string or s == .bytes) {
+                try e.print("if (_gop.value_ptr.*.len > 0) allocator.free(_gop.value_ptr.*);\n", .{});
+            }
+        },
+        .named => {
+            try e.print("_gop.value_ptr.deinit(allocator);\n", .{});
+        },
+        .enum_ref => {},
+    }
+    try e.close_brace_nosemi();
+    // For non-found case with getOrPut, key is already stored
+    try e.print("\n", .{});
+    try e.print("_gop.value_ptr.* = {s};\n", .{val_expr});
+}
+
+/// Emit errdefer to clean up a local `list` variable on error paths.
+/// Frees string/bytes elements and the list backing array.
+fn emit_list_errdefer(e: *Emitter, s: ast.ScalarType) !void {
+    if (s == .string or s == .bytes) {
+        try e.print("errdefer {{ for (list.items) |_item| allocator.free(_item); list.deinit(allocator); }}\n", .{});
+    } else {
+        try e.print("errdefer list.deinit(allocator);\n", .{});
+    }
+}
+
+/// Emit errdefer for a list of named (message) types - deinits each element.
+fn emit_named_list_errdefer(e: *Emitter) !void {
+    try e.print("errdefer {{ for (list.items) |*_item| _item.deinit(allocator); list.deinit(allocator); }}\n", .{});
 }
 
 // ── Deinit Method ─────────────────────────────────────────────────────
@@ -2302,11 +2392,8 @@ fn emit_wrapper_from_json_method(e: *Emitter, kind: WrapperKind) !void {
     try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *json.JsonScanner, depth_remaining: usize) !@This()", .{});
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
-    switch (kind) {
-        .string_value, .bytes_value => {},
-        else => try e.print("_ = allocator;\n", .{}),
-    }
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const maybe_tok = try scanner.peek() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (maybe_tok == .null_value) {{ _ = try scanner.next(); return result; }}\n", .{});
     switch (kind) {
@@ -2369,8 +2456,8 @@ fn emit_timestamp_from_json_method(e: *Emitter) !void {
     try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *json.JsonScanner, depth_remaining: usize) !@This()", .{});
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
-    try e.print("_ = allocator;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("if (try json.read_timestamp_value(scanner)) |ts| {{ result.seconds = ts.seconds; result.nanos = ts.nanos; }}\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi();
@@ -2397,8 +2484,8 @@ fn emit_duration_from_json_method(e: *Emitter) !void {
     try e.print("pub fn from_json_scanner_inner(allocator: std.mem.Allocator, scanner: *json.JsonScanner, depth_remaining: usize) !@This()", .{});
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
-    try e.print("_ = allocator;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("if (try json.read_duration_value(scanner)) |dur| {{ result.seconds = dur.seconds; result.nanos = dur.nanos; }}\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi();
@@ -2426,6 +2513,7 @@ fn emit_field_mask_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("result.paths = try json.read_field_mask_paths(scanner, allocator);\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi();
@@ -2655,6 +2743,7 @@ fn emit_any_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("var seen_fields: std.StringHashMapUnmanaged(void) = .{{}};\n", .{});
     try e.print("defer seen_fields.deinit(allocator);\n", .{});
     try e.print("var payload_entries: std.ArrayListUnmanaged(struct {{ key: []const u8, value_json: []const u8 }}) = .empty;\n", .{});
@@ -2979,6 +3068,7 @@ fn emit_struct_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (start_tok == .null_value) return result;\n", .{});
     try e.print("if (start_tok != .object_start) return error.UnexpectedToken;\n", .{});
@@ -3041,6 +3131,7 @@ fn emit_list_value_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const start_tok = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (start_tok == .null_value) return result;\n", .{});
     try e.print("if (start_tok != .array_start) return error.UnexpectedToken;\n", .{});
@@ -3067,7 +3158,7 @@ fn emit_value_to_json_method(e: *Emitter) !void {
     try e.print("if (self.kind) |oneof_val| switch (oneof_val) {{\n", .{});
     e.indent_level += 1;
     try e.print(".null_value => |_| try json.write_null(writer),\n", .{});
-    try e.print(".number_value => |v| try json.write_float(writer, v),\n", .{});
+    try e.print(".number_value => |v| {{ if (std.math.isNan(v) or std.math.isInf(v)) return error.WriteFailed; try json.write_float(writer, v); }},\n", .{});
     try e.print(".string_value => |v| try json.write_string(writer, v),\n", .{});
     try e.print(".bool_value => |v| try json.write_bool(writer, v),\n", .{});
     try e.print(".struct_value => |sub| try sub.to_json(writer),\n", .{});
@@ -3099,6 +3190,7 @@ fn emit_value_from_json_method(e: *Emitter) !void {
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
     try e.print("var result: @This() = .{{}};\n", .{});
+    try e.print("errdefer result.deinit(allocator);\n", .{});
     try e.print("const tok = try scanner.peek() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("switch (tok) {{\n", .{});
     e.indent_level += 1;
@@ -3167,7 +3259,7 @@ fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_n
 
         for (items) |item| {
             switch (item) {
-                .field => |f| try emit_json_field(e, f, syntax, full_name),
+                .field => |f| try emit_json_field(e, f, syntax, full_name, msg.extension_ranges),
                 .map => |m| try emit_json_map(e, m),
                 .oneof => |o| try emit_json_oneof(e, o, full_name),
                 .group => |g| try emit_json_group(e, g),
@@ -3181,6 +3273,16 @@ fn emit_to_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full_n
         try e.print("try json.write_object_end(writer);\n", .{});
     }
     try e.close_brace_nosemi();
+}
+
+/// Build the JSON field name for an extension field: `[package.field_name]`
+/// `full_name` is the fully-qualified message name (e.g., "pkg.MessageName").
+fn extension_json_name(full_name: []const u8, field_name: []const u8, buf: []u8) []const u8 {
+    const pkg = if (std.mem.lastIndexOfScalar(u8, full_name, '.')) |idx| full_name[0..idx] else "";
+    if (pkg.len > 0) {
+        return std.fmt.bufPrint(buf, "[{s}.{s}]", .{ pkg, field_name }) catch field_name;
+    }
+    return std.fmt.bufPrint(buf, "[{s}]", .{field_name}) catch field_name;
 }
 
 fn json_field_name(field_name: []const u8, options: []const ast.FieldOption, buf: []u8) []const u8 {
@@ -3197,10 +3299,13 @@ fn json_field_name(field_name: []const u8, options: []const ast.FieldOption, buf
     return types.snake_to_lower_camel(field_name, buf);
 }
 
-fn emit_json_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax, full_name: []const u8) !void {
+fn emit_json_field(e: *Emitter, field: ast.Field, syntax: ast.Syntax, full_name: []const u8, extension_ranges: []const ast.ExtensionRange) !void {
     const escaped = types.escape_zig_keyword(field.name);
     var json_name_buf: [256]u8 = undefined;
-    const jname = json_field_name(field.name, field.options, &json_name_buf);
+    const jname = if (number_in_extension_ranges(field.number, extension_ranges))
+        extension_json_name(full_name, field.name, &json_name_buf)
+    else
+        json_field_name(field.name, field.options, &json_name_buf);
 
     switch (field.type_name) {
         .scalar => |s| {
@@ -3718,6 +3823,7 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
         try e.print("var seen_fields: std.StringHashMapUnmanaged(void) = .{{}};\n", .{});
         try e.print("defer seen_fields.deinit(allocator);\n", .{});
     }
@@ -3850,7 +3956,7 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
     for (items) |item| {
         switch (item) {
             .field => |f| {
-                try emit_from_json_field_branch(e, f, syntax, &first_branch, recursive_types, full_name);
+                try emit_from_json_field_branch(e, f, syntax, &first_branch, recursive_types, full_name, msg.extension_ranges);
             },
             .map => |m| {
                 try emit_from_json_map_branch(e, m, &first_branch);
@@ -3885,8 +3991,9 @@ fn emit_from_json_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
     try e.close_brace_nosemi(); // fn
 }
 
-fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, first_branch: *bool, recursive_types: *const RecursiveTypes, full_name: []const u8) !void {
+fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, first_branch: *bool, recursive_types: *const RecursiveTypes, full_name: []const u8, extension_ranges: []const ast.ExtensionRange) !void {
     const escaped = types.escape_zig_keyword(field.name);
+    const is_extension = number_in_extension_ranges(field.number, extension_ranges);
     var json_name_buf: [256]u8 = undefined;
     const jname = json_field_name(field.name, field.options, &json_name_buf);
     const json_mod = "json";
@@ -3901,6 +4008,12 @@ fn emit_from_json_field_branch(e: *Emitter, field: ast.Field, _: ast.Syntax, fir
     try e.print_raw("std.mem.eql(u8, key, \"{s}\")", .{jname});
     if (!std.mem.eql(u8, jname, field.name)) {
         try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{field.name});
+    }
+    // For extension fields, also match bracket notation: [package.field_name]
+    if (is_extension) {
+        var ext_name_buf: [512]u8 = undefined;
+        const ext_jname = extension_json_name(full_name, field.name, &ext_name_buf);
+        try e.print_raw(" or std.mem.eql(u8, key, \"{s}\")", .{ext_jname});
     }
     try e.print_raw(")", .{});
     try e.open_brace();
@@ -3982,6 +4095,7 @@ fn emit_from_json_repeated_scalar(e: *Emitter, escaped: types.EscapedName, s: as
     try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{types.scalar_zig_type(s)});
+    try emit_list_errdefer(e, s);
     try e.print("while (true)", .{});
     try e.open_brace();
     try e.print("if (try scanner.peek()) |p| {{\n", .{});
@@ -4004,6 +4118,7 @@ fn emit_from_json_repeated_named(e: *Emitter, escaped: types.EscapedName, name: 
     try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
+    try emit_named_list_errdefer(e);
     try e.print("while (true)", .{});
     try e.open_brace();
     try e.print("if (try scanner.peek()) |p| {{\n", .{});
@@ -4025,6 +4140,7 @@ fn emit_from_json_repeated_enum(e: *Emitter, escaped: types.EscapedName, enum_na
     try e.print("const arr_start = try scanner.next() orelse return error.UnexpectedEndOfInput;\n", .{});
     try e.print("if (arr_start != .array_start) return error.UnexpectedToken;\n", .{});
     try e.print("var list: std.ArrayListUnmanaged(@TypeOf(result.{f}[0])) = .empty;\n", .{escaped});
+    try e.print("errdefer list.deinit(allocator);\n", .{});
     try e.print("while (true)", .{});
     try e.open_brace();
     try e.print("if (try scanner.peek()) |p| {{\n", .{});
@@ -4082,6 +4198,7 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     // Coerce key
     if (types.is_string_key(map_field.key_type)) {
         try e.print("const map_key = try allocator.dupe(u8, map_key_str);\n", .{});
+        try e.print("errdefer allocator.free(map_key);\n", .{});
     } else if (map_field.key_type == .bool) {
         try e.print("const map_key = std.mem.eql(u8, map_key_str, \"true\");\n", .{});
     } else {
@@ -4096,14 +4213,17 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
             const read_fn = types.scalar_json_read_fn(s);
             if (s == .string) {
                 try e.print("const map_val = try allocator.dupe(u8, try {s}.{s}(scanner));\n", .{ json_mod, read_fn });
+                try e.print("errdefer allocator.free(map_val);\n", .{});
             } else if (s == .bytes) {
                 try e.print("const map_val = try {s}.{s}(scanner, allocator);\n", .{ json_mod, read_fn });
+                try e.print("errdefer allocator.free(map_val);\n", .{});
             } else {
                 try e.print("const map_val = try {s}.{s}(scanner);\n", .{ json_mod, read_fn });
             }
         },
         .named => |name| {
-            try e.print("const map_val = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+            try e.print("var map_val = try {s}.from_json_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+            try e.print("errdefer map_val.deinit(allocator);\n", .{});
         },
         .enum_ref => |name| {
             try e.print("const map_val_opt: ?{s} = blk: {{\n", .{name});
@@ -4121,10 +4241,18 @@ fn emit_from_json_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     }
     switch (map_field.value_type) {
         .enum_ref => {
-            try e.print("if (map_val_opt) |map_val| try result.{f}.put(allocator, map_key, map_val);\n", .{escaped});
+            try e.print("if (map_val_opt) |map_val|", .{});
+            try e.open_brace();
+            try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "map_key", "map_val");
+            try e.close_brace_nosemi();
+            if (types.is_string_key(map_field.key_type)) {
+                try e.print(" else {{ allocator.free(map_key); }}\n", .{});
+            } else {
+                try e.print("\n", .{});
+            }
         },
         else => {
-            try e.print("try result.{f}.put(allocator, map_key, map_val);\n", .{escaped});
+            try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "map_key", "map_val");
         },
     }
 
@@ -4765,13 +4893,14 @@ fn emit_from_text_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, full
     const items = try collect_all_fields(e.allocator, msg);
     defer e.allocator.free(items);
 
-    if (!msg_fields_need_allocator(msg)) {
-        try e.print("_ = allocator;\n", .{});
-    }
     if (items.len == 0) {
+        if (!msg_fields_need_allocator(msg)) {
+            try e.print("_ = allocator;\n", .{});
+        }
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
     }
 
     // Loop over tokens
@@ -4878,11 +5007,18 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                         e.indent_level += 1;
                         try e.print("const _sv = try text_format.{s}(scanner);\n", .{read_fn});
                         try e.print("try text_format.validate_utf8(_sv);\n", .{});
+                        try emit_free_old_scalar(e, field.label, escaped, s);
                         try e.print("result.{f} = try allocator.dupe(u8, _sv);\n", .{escaped});
                         e.indent_level -= 1;
                         try e.print("}}\n", .{});
                     } else if (s == .bytes) {
-                        try e.print("result.{f} = try allocator.dupe(u8, try text_format.{s}(scanner));\n", .{ escaped, read_fn });
+                        try e.print("{{\n", .{});
+                        e.indent_level += 1;
+                        try e.print("const _bv = try text_format.{s}(scanner);\n", .{read_fn});
+                        try emit_free_old_scalar(e, field.label, escaped, s);
+                        try e.print("result.{f} = try allocator.dupe(u8, _bv);\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}}\n", .{});
                     } else {
                         try e.print("result.{f} = try text_format.{s}(scanner);\n", .{ escaped, read_fn });
                     }
@@ -4905,13 +5041,20 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                         try e.print("{{\n", .{});
                         e.indent_level += 1;
                         try e.print("const val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+                        try e.print("if (result.{f}) |old_ptr| {{ old_ptr.deinit(allocator); allocator.destroy(old_ptr); }}\n", .{escaped});
                         try e.print("const ptr = try allocator.create({s});\n", .{name});
                         try e.print("ptr.* = val;\n", .{});
                         try e.print("result.{f} = ptr;\n", .{escaped});
                         e.indent_level -= 1;
                         try e.print("}}\n", .{});
                     } else {
-                        try e.print("result.{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, name });
+                        try e.print("{{\n", .{});
+                        e.indent_level += 1;
+                        try e.print("const val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+                        try e.print("if (result.{f}) |*_old| _old.deinit(allocator);\n", .{escaped});
+                        try e.print("result.{f} = val;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}}\n", .{});
                     }
                     try emit_text_expect_close_brace_or_angle(e);
                 },
@@ -4921,7 +5064,13 @@ fn emit_from_text_field_branch(e: *Emitter, field: ast.Field, first_branch: *boo
                     if (std.mem.eql(u8, name, "google.protobuf.Any")) {
                         try emit_from_text_any_shorthand_field(e, escaped, full_name);
                     } else {
-                        try e.print("result.{f} = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{ escaped, name });
+                        try e.print("{{\n", .{});
+                        e.indent_level += 1;
+                        try e.print("const val = try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1);\n", .{name});
+                        try e.print("result.{f}.deinit(allocator);\n", .{escaped});
+                        try e.print("result.{f} = val;\n", .{escaped});
+                        e.indent_level -= 1;
+                        try e.print("}}\n", .{});
                     }
                     try emit_text_expect_close_brace_or_angle(e);
                 },
@@ -5005,6 +5154,7 @@ fn emit_from_text_repeated_scalar(e: *Emitter, escaped: types.EscapedName, s: as
     try e.print("{{\n", .{});
     e.indent_level += 1;
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{types.scalar_zig_type(s)});
+    try emit_list_errdefer(e, s);
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
     // Check for bracket list form: field: [val, val, ...]
@@ -5061,6 +5211,7 @@ fn emit_from_text_repeated_named(e: *Emitter, escaped: types.EscapedName, name: 
     try e.print("{{\n", .{});
     e.indent_level += 1;
     try e.print("var list: std.ArrayListUnmanaged({s}) = .empty;\n", .{name});
+    try emit_named_list_errdefer(e);
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
     try e.print("try list.append(allocator, try {s}.from_text_scanner_inner(allocator, scanner, depth_remaining - 1));\n", .{name});
@@ -5075,6 +5226,7 @@ fn emit_from_text_repeated_enum(e: *Emitter, escaped: types.EscapedName) !void {
     try e.print("{{\n", .{});
     e.indent_level += 1;
     try e.print("var list: std.ArrayListUnmanaged(@TypeOf(result.{f}[0])) = .empty;\n", .{escaped});
+    try e.print("errdefer list.deinit(allocator);\n", .{});
     try e.print("for (result.{f}) |existing| try list.append(allocator, existing);\n", .{escaped});
     try e.print("if (result.{f}.len > 0) allocator.free(result.{f});\n", .{ escaped, escaped });
     // Check for bracket list form
@@ -5143,6 +5295,23 @@ fn emit_text_expect_close_brace_or_angle(e: *Emitter) !void {
     try e.print("}}\n", .{});
 }
 
+fn emit_text_map_errdefer(e: *Emitter, key_type: ast.ScalarType, value_type: ast.TypeRef) !void {
+    if (types.is_string_key(key_type)) {
+        try e.print("errdefer {{ if (map_key) |k| allocator.free(k); }}\n", .{});
+    }
+    switch (value_type) {
+        .scalar => |s| {
+            if (s == .string or s == .bytes) {
+                try e.print("errdefer {{ if (map_val) |v| {{ if (v.len > 0) allocator.free(v); }} }}\n", .{});
+            }
+        },
+        .named => {
+            try e.print("errdefer {{ if (map_val) |*v| v.deinit(allocator); }}\n", .{});
+        },
+        .enum_ref => {},
+    }
+}
+
 fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch: *bool) !void {
     const escaped = types.escape_zig_keyword(map_field.name);
 
@@ -5169,6 +5338,7 @@ fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
         .enum_ref => |n| n,
     };
     try e.print("var map_val: ?{s} = null;\n", .{value_zig_type});
+    try emit_text_map_errdefer(e, map_field.key_type, map_field.value_type);
 
     // Loop inside map entry
     try e.print("while (try scanner.peek()) |entry_tok|", .{});
@@ -5241,19 +5411,17 @@ fn emit_from_text_map_branch(e: *Emitter, map_field: ast.MapField, first_branch:
     try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
 
-    // Put key/value into map
-    try e.print("if (map_key) |k| {{\n", .{});
-    e.indent_level += 1;
-    try e.print("try result.{f}.put(allocator, k, map_val orelse ", .{escaped});
-    // Default value for map values
+    // Put key/value into map, freeing old entries on duplicate keys
+    try e.print("if (map_key) |k|", .{});
+    try e.open_brace();
     switch (map_field.value_type) {
-        .scalar => |s| try e.print_raw("{s}", .{types.scalar_default_value(s)}),
-        .named => try e.print_raw("undefined", .{}),
-        .enum_ref => try e.print_raw("@enumFromInt(0)", .{}),
+        .scalar => |s| try e.print("const v = map_val orelse {s};\n", .{types.scalar_default_value(s)}),
+        .named => |nname| try e.print("const v: {s} = map_val orelse .{{}};\n", .{nname}),
+        .enum_ref => |ename| try e.print("const v: {s} = map_val orelse @enumFromInt(0);\n", .{ename}),
     }
-    try e.print_raw(");\n", .{});
-    e.indent_level -= 1;
-    try e.print("}}\n", .{});
+    try emit_map_put_with_free(e, escaped, map_field.key_type, map_field.value_type, "k", "v");
+    try e.close_brace_nosemi();
+    try e.print("\n", .{});
 
     e.indent_level -= 1;
     try e.print("}}", .{});
@@ -5375,13 +5543,14 @@ fn emit_group_from_text_method(e: *Emitter, group: ast.Group, recursive_types: *
     try e.open_brace();
     try e.print("if (depth_remaining == 0) return error.RecursionLimitExceeded;\n", .{});
 
-    if (!group_fields_need_allocator(group)) {
-        try e.print("_ = allocator;\n", .{});
-    }
     if (group.fields.len == 0) {
+        if (!group_fields_need_allocator(group)) {
+            try e.print("_ = allocator;\n", .{});
+        }
         try e.print("const result: @This() = .{{}};\n", .{});
     } else {
         try e.print("var result: @This() = .{{}};\n", .{});
+        try e.print("errdefer result.deinit(allocator);\n", .{});
     }
     try e.print("while (try scanner.peek()) |tok|", .{});
     try e.open_brace();

@@ -84,29 +84,46 @@ pub fn build(b: *std.Build) void {
         const fuzz_options = b.addOptions();
         fuzz_options.addOption([]const u8, "fuzz_target", ft);
 
+        const fuzz_harness_mod = b.createModule(.{
+            .root_source_file = b.path("src/fuzz_harness.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "protobuf", .module = protobuf_mod },
+                .{ .name = "build_options", .module = fuzz_options.createModule() },
+            },
+        });
+
         const fuzz_obj = b.addObject(.{
             .name = "protobuf-fuzz",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/fuzz_harness.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "protobuf", .module = protobuf_mod },
-                    .{ .name = "build_options", .module = fuzz_options.createModule() },
-                },
-            }),
+            .root_module = fuzz_harness_mod,
         });
         fuzz_obj.root_module.stack_check = false;
         fuzz_obj.root_module.link_libc = true;
 
-        {
+        if (b.findProgram(&.{"afl-cc"}, &.{})) |_| {
             const afl = @import("afl_kit");
             const llvm_cfg: ?[]const []const u8 = if (llvm_config_path) |p| &.{p} else null;
             if (afl.addInstrumentedExe(b, target, optimize, llvm_cfg, true, fuzz_obj, &.{})) |fuzz_exe| {
                 const install = b.addInstallBinFile(fuzz_exe, "protobuf-fuzz");
                 fuzz_step.dependOn(&install.step);
             }
-        }
+        } else |_| {}
+
+        // Plain replay binary (no AFL instrumentation) for crash triage
+        const replay_exe = b.addExecutable(.{
+            .name = "fuzz-replay",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/fuzz_replay.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "fuzz_harness", .module = fuzz_harness_mod },
+                },
+            }),
+        });
+        const replay_step = b.step("fuzz-replay", "Build replay binary for crash triage");
+        replay_step.dependOn(&b.addInstallArtifact(replay_exe, .{}).step);
     }
 }
 

@@ -510,7 +510,21 @@ pub const DynamicMessage = struct {
         return null;
     }
 
+    fn expectedWireType(ft: descriptor.FieldType) encoding.WireType {
+        return switch (ft) {
+            .double, .fixed64, .sfixed64 => .i64,
+            .float, .fixed32, .sfixed32 => .i32,
+            .int32, .int64, .uint32, .uint64, .sint32, .sint64, .bool, .enum_type => .varint,
+            .string, .bytes, .message => .len,
+            .group => .sgroup,
+        };
+    }
+
     fn decodeFieldValue(msg: *DynamicMessage, fd: *const descriptor.FieldDescriptor, field: message.Field, depth_remaining: usize, registry: ?*const descriptor.TypeRegistry) !void {
+        // Skip fields with mismatched wire types (per protobuf spec).
+        const expected_wt = expectedWireType(fd.field_type);
+        if (@as(std.meta.Tag(@TypeOf(field.value)), field.value) != expected_wt) return;
+
         const val = try wireToValue(msg.allocator, fd.field_type, field, fd, msg.desc, depth_remaining, registry);
 
         if (fd.label == .repeated) {

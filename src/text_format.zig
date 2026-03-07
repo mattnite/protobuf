@@ -105,6 +105,80 @@ pub fn write_enum_value(writer: *Writer, value: anytype) Error!void {
     try writer.print("{d}", .{int_value});
 }
 
+/// Write unknown fields from raw protobuf bytes in text format.
+/// Each field is printed as `field_number: value` using the wire type
+/// to determine the display format. Groups are printed recursively.
+pub fn write_unknown_fields(writer: *Writer, data: []const u8, indent: usize) Error!void {
+    const message = @import("message.zig");
+    var iter = message.iterate_fields(data);
+    write_unknown_fields_iter(writer, &iter, indent, null) catch return error.WriteFailed;
+}
+
+fn write_unknown_fields_iter(writer: *Writer, iter: anytype, indent: usize, end_group_number: ?u29) Error!void {
+    while (iter.next() catch return error.WriteFailed) |field| {
+        switch (field.value) {
+            .egroup => {
+                // End of group — return to caller if this matches the expected group number
+                if (end_group_number) |expected| {
+                    if (field.number == expected) return;
+                }
+                // Unexpected egroup — skip
+            },
+            .sgroup => {
+                // Start of group — print header and recurse
+                try write_indent(writer, indent);
+                writer.print("{d} {{\n", .{field.number}) catch return error.WriteFailed;
+                try write_unknown_fields_iter(writer, iter, indent + 1, field.number);
+                try write_indent(writer, indent);
+                try writer.writeAll("}\n");
+            },
+            .varint => |v| {
+                try write_indent(writer, indent);
+                writer.print("{d}: {d}\n", .{ field.number, v }) catch return error.WriteFailed;
+            },
+            .i64 => |v| {
+                try write_indent(writer, indent);
+                writer.print("{d}: 0x{X:0>16}\n", .{ field.number, v }) catch return error.WriteFailed;
+            },
+            .i32 => |v| {
+                try write_indent(writer, indent);
+                writer.print("{d}: 0x{X:0>8}\n", .{ field.number, v }) catch return error.WriteFailed;
+            },
+            .len => |v| {
+                // Try to parse as a sub-message first; if all bytes are
+                // consumed by valid fields, print as a nested message.
+                if (looks_like_submessage(v)) {
+                    try write_indent(writer, indent);
+                    writer.print("{d} {{\n", .{field.number}) catch return error.WriteFailed;
+                    try write_unknown_fields(writer, v, indent + 1);
+                    try write_indent(writer, indent);
+                    try writer.writeAll("}\n");
+                } else {
+                    try write_indent(writer, indent);
+                    writer.print("{d}: ", .{field.number}) catch return error.WriteFailed;
+                    try write_string(writer, v);
+                    try writer.writeByte('\n');
+                }
+            },
+        }
+    }
+}
+
+/// Check if raw bytes can be fully parsed as a valid protobuf message.
+/// Used to decide whether a LEN-encoded unknown field should be printed
+/// as a sub-message or as a raw string.
+fn looks_like_submessage(data: []const u8) bool {
+    if (data.len == 0) return false;
+    const message = @import("message.zig");
+    var iter = message.iterate_fields(data);
+    while (true) {
+        const field = iter.next() catch return false;
+        if (field == null) break;
+    }
+    // All bytes consumed by valid fields
+    return iter.pos == data.len;
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Text Format Scanner (Deserialization)
 // ══════════════════════════════════════════════════════════════════════

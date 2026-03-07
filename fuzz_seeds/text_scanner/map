@@ -1,0 +1,8 @@
+labels {
+  key: "foo"
+  value: 1
+}
+labels {
+  key: "bar"
+  value: 2
+}

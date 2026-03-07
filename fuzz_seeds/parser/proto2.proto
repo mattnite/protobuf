@@ -1,0 +1,13 @@
+syntax = "proto2";
+message Legacy {
+  required int32 id = 1;
+  optional string name = 2;
+  repeated fixed64 data = 3 [packed = true];
+  extensions 100 to 200;
+  group MyGroup = 4 {
+    optional int32 a = 5;
+  }
+}
+extend Legacy {
+  optional string ext_field = 100;
+}

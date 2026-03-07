@@ -1,0 +1,34 @@
+syntax = "proto3";
+package mypackage;
+import "dep.proto";
+option optimize_for = SPEED;
+message Person {
+  string name = 1;
+  int32 id = 2;
+  repeated string emails = 3;
+  map<string, string> attrs = 4;
+  oneof contact {
+    string phone = 5;
+    string address = 6;
+  }
+  message PhoneNumber {
+    string number = 1;
+    enum PhoneType {
+      MOBILE = 0;
+      HOME = 1;
+      WORK = 2;
+    }
+    PhoneType type = 2;
+  }
+  repeated PhoneNumber phones = 7;
+  reserved 100 to 200;
+}
+enum Status {
+  UNKNOWN = 0;
+  ACTIVE = 1;
+  INACTIVE = 2;
+}
+service PersonService {
+  rpc GetPerson(Person) returns (Person);
+  rpc ListPersons(Person) returns (stream Person);
+}
