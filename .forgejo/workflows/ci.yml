@@ -68,6 +68,8 @@ jobs:
 
   conformance-tests:
     runs-on: x86_64-linux
+    env:
+      PROTOBUF_VERSION: v29.3
     steps:
       - uses: actions/checkout@v4
 
@@ -75,13 +77,22 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Cache conformance runner
+        id: cache-conformance
+        uses: actions/cache@v4
+        with:
+          path: /tmp/conformance_test_runner
+          key: conformance-runner-${{ env.PROTOBUF_VERSION }}
+
       - name: Build conformance runner
+        if: steps.cache-conformance.outputs.cache-hit != 'true'
         run: |
           apt-get update && apt-get install -y curl cmake g++
-          git clone --depth=1 https://github.com/protocolbuffers/protobuf /tmp/protobuf
+          git clone --depth=1 --branch ${{ env.PROTOBUF_VERSION }} https://github.com/protocolbuffers/protobuf /tmp/protobuf
           cmake -S /tmp/protobuf -B /tmp/protobuf/build -Dprotobuf_BUILD_CONFORMANCE=ON -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/protobuf/build --target conformance_test_runner -j$(nproc)
+          cp /tmp/protobuf/build/conformance_test_runner /tmp/conformance_test_runner
 
       - name: Run conformance tests
         working-directory: conformance
-        run: zig build run -Dconformance-runner=/tmp/protobuf/build/conformance_test_runner
+        run: zig build run -Dconformance-runner=/tmp/conformance_test_runner
