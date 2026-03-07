@@ -90,7 +90,7 @@ pub const FieldIterator = struct {
             .i32 => .{ .i32 = std.mem.littleToNative(u32, @bitCast(try read_fixed_slice(4, self.data, &self.pos))) },
             .len => blk: {
                 const len = std.math.cast(usize, try decode_varint_slice(self.data, &self.pos)) orelse return error.Overflow;
-                if (self.pos + len > self.data.len) return error.EndOfStream;
+                if (len > self.data.len - self.pos) return error.EndOfStream;
                 const slice = self.data[self.pos..][0..len];
                 self.pos += len;
                 break :blk .{ .len = slice };
@@ -118,7 +118,7 @@ pub fn skip_field(data: []const u8, pos: *usize, wire_type: encoding.WireType) E
         .i32 => _ = try read_fixed_slice(4, data, pos),
         .len => {
             const len = std.math.cast(usize, try decode_varint_slice(data, pos)) orelse return error.Overflow;
-            if (pos.* + len > data.len) return error.EndOfStream;
+            if (len > data.len - pos.*) return error.EndOfStream;
             pos.* += len;
         },
         .sgroup => |_| return error.InvalidWireType,
