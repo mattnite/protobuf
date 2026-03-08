@@ -1063,15 +1063,17 @@ fn emit_encode_packed_scalar(e: *Emitter, escaped: types.EscapedName, s: ast.Sca
             try e.print("var packed_size: usize = 0;\n", .{});
             try e.print("for (self.{f}) |item| packed_size += {s};\n", .{ escaped, types.scalar_packed_varint_size_expr(s) });
             try e.print("try mw.write_len_prefix({d}, packed_size);\n", .{num});
-            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_encode_expr(s) });
+            try e.print("var pvw: encoding.PackedVarintWriter = .{{ .writer = writer }};\n", .{});
+            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_buffered_encode_expr(s) });
+            try e.print("try pvw.flush();\n", .{});
         },
         .fixed32 => {
             try e.print("try mw.write_len_prefix({d}, self.{f}.len * 4);\n", .{ num, escaped });
-            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_encode_expr(s) });
+            try e.print("try encoding.encode_packed_fixed32(writer, @ptrCast(self.{f}));\n", .{escaped});
         },
         .fixed64 => {
             try e.print("try mw.write_len_prefix({d}, self.{f}.len * 8);\n", .{ num, escaped });
-            try e.print("for (self.{f}) |item| {s};\n", .{ escaped, types.scalar_packed_encode_expr(s) });
+            try e.print("try encoding.encode_packed_fixed64(writer, @ptrCast(self.{f}));\n", .{escaped});
         },
     }
     try e.close_brace_nosemi();
@@ -1083,7 +1085,9 @@ fn emit_encode_packed_enum(e: *Emitter, escaped: types.EscapedName, num: i32) !v
     try e.print("var packed_size: usize = 0;\n", .{});
     try e.print("for (self.{f}) |item| packed_size += encoding.varint_size(@as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{escaped});
     try e.print("try mw.write_len_prefix({d}, packed_size);\n", .{num});
-    try e.print("for (self.{f}) |item| try encoding.encode_varint(writer, @as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{escaped});
+    try e.print("var pvw: encoding.PackedVarintWriter = .{{ .writer = writer }};\n", .{});
+    try e.print("for (self.{f}) |item| try pvw.writeVarint(@as(u64, @bitCast(@as(i64, @intFromEnum(item)))));\n", .{escaped});
+    try e.print("try pvw.flush();\n", .{});
     try e.close_brace_nosemi();
 }
 

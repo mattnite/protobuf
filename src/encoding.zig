@@ -113,6 +113,60 @@ pub fn decode_fixed64(r: *std.Io.Reader) std.Io.Reader.Error!u64 {
     return std.mem.littleToNative(u64, @bitCast(bytes.*));
 }
 
+// ── Packed fixed-width ────────────────────────────────────────────────
+
+const native_endian = @import("builtin").cpu.arch.endian();
+
+/// Encode a slice of u32 values as packed little-endian bytes.
+/// On little-endian systems, this is a single memcpy.
+pub fn encode_packed_fixed32(w: *std.Io.Writer, values: []const u32) std.Io.Writer.Error!void {
+    if (native_endian == .little) {
+        try w.writeAll(std.mem.sliceAsBytes(values));
+    } else {
+        for (values) |v| try encode_fixed32(w, v);
+    }
+}
+
+/// Encode a slice of u64 values as packed little-endian bytes.
+/// On little-endian systems, this is a single memcpy.
+pub fn encode_packed_fixed64(w: *std.Io.Writer, values: []const u64) std.Io.Writer.Error!void {
+    if (native_endian == .little) {
+        try w.writeAll(std.mem.sliceAsBytes(values));
+    } else {
+        for (values) |v| try encode_fixed64(w, v);
+    }
+}
+
+// ── Packed varint writer ──────────────────────────────────────────────
+
+/// Batches varint encoding into a stack buffer to reduce per-byte writer dispatch.
+pub const PackedVarintWriter = struct {
+    writer: *std.Io.Writer,
+    buf: [4096]u8 = undefined,
+    pos: usize = 0,
+
+    pub const Error = std.Io.Writer.Error;
+
+    pub fn writeVarint(self: *PackedVarintWriter, value: u64) Error!void {
+        if (self.pos + 10 > self.buf.len) try self.flush();
+        var v = value;
+        while (v > 0x7F) {
+            self.buf[self.pos] = @as(u8, @truncate(v)) | 0x80;
+            self.pos += 1;
+            v >>= 7;
+        }
+        self.buf[self.pos] = @truncate(v);
+        self.pos += 1;
+    }
+
+    pub fn flush(self: *PackedVarintWriter) Error!void {
+        if (self.pos > 0) {
+            try self.writer.writeAll(self.buf[0..self.pos]);
+            self.pos = 0;
+        }
+    }
+};
+
 // ── Float/Double ──────────────────────────────────────────────────────
 
 /// Encode an f32 as 4 little-endian bytes
