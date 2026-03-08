@@ -153,6 +153,21 @@ pub fn scalar_packed_encode_expr(s: ScalarType) []const u8 {
     };
 }
 
+/// Returns the buffered encode expression for packed varint encoding using PackedVarintWriter.
+/// The variable name for the loop element is "item", and the writer is "pvw".
+pub fn scalar_packed_buffered_encode_expr(s: ScalarType) []const u8 {
+    return switch (s) {
+        .int32 => "try pvw.writeVarint(@as(u64, @bitCast(@as(i64, item))))",
+        .int64 => "try pvw.writeVarint(@as(u64, @bitCast(item)))",
+        .uint32 => "try pvw.writeVarint(@as(u64, item))",
+        .uint64 => "try pvw.writeVarint(item)",
+        .sint32 => "try pvw.writeVarint(@as(u64, encoding.zigzag_encode(item)))",
+        .sint64 => "try pvw.writeVarint(encoding.zigzag_encode_64(item))",
+        .bool => "try pvw.writeVarint(@intFromBool(item))",
+        else => unreachable,
+    };
+}
+
 /// Returns the expression to decode a scalar from a FieldValue.
 pub fn scalar_decode_expr(s: ScalarType) []const u8 {
     return switch (s) {
