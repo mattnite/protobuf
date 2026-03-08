@@ -642,10 +642,23 @@ fn emit_group_decode_method(e: *Emitter, group: ast.Group, syntax: ast.Syntax, r
         try e.print("var result: @This() = .{{}};\n", .{});
         try e.print("errdefer result.deinit(allocator);\n", .{});
     }
+    for (group.fields) |field| {
+        if (field.label == .repeated) {
+            try emit_repeated_list_decl(e, field);
+        }
+    }
     try e.print("while (try iter.next()) |field|", .{});
     try e.open_brace();
     // Check for egroup matching the group field number
-    try e.print("if (field.value == .egroup and field.number == group_field_number) return result;\n", .{});
+    try e.print("if (field.value == .egroup and field.number == group_field_number)", .{});
+    try e.open_brace();
+    for (group.fields) |field| {
+        if (field.label == .repeated) {
+            try emit_repeated_list_finalize(e, field);
+        }
+    }
+    try e.print("return result;\n", .{});
+    try e.close_brace_nosemi();
     try e.print("switch (field.number)", .{});
     try e.open_brace();
 
@@ -1624,6 +1637,16 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, recursi
 
     try e.print("var result: @This() = .{{}};\n", .{});
     try e.print("errdefer result.deinit(allocator);\n", .{});
+    for (msg.fields) |field| {
+        if (field.label == .repeated) {
+            try emit_repeated_list_decl(e, field);
+        }
+    }
+    for (msg.groups) |grp| {
+        if (grp.label == .repeated) {
+            try emit_repeated_group_list_decl(e, grp);
+        }
+    }
     try e.print("var unknown_writer: std.Io.Writer.Allocating = .init(allocator);\n", .{});
     try e.print("defer unknown_writer.deinit();\n", .{});
     try e.print("var iter = message.iterate_fields(bytes);\n", .{});
@@ -1672,6 +1695,17 @@ fn emit_decode_method(e: *Emitter, msg: ast.Message, syntax: ast.Syntax, recursi
 
     try e.close_brace_nosemi(); // switch
     try e.close_brace_nosemi(); // while
+    // Finalize repeated field lists
+    for (msg.fields) |field| {
+        if (field.label == .repeated) {
+            try emit_repeated_list_finalize(e, field);
+        }
+    }
+    for (msg.groups) |grp| {
+        if (grp.label == .repeated) {
+            try emit_repeated_group_list_finalize(e, grp);
+        }
+    }
     try e.print("if (unknown_writer.written().len > 0) result._unknown_fields = try unknown_writer.toOwnedSlice();\n", .{});
     try e.print("return result;\n", .{});
     try e.close_brace_nosemi(); // fn
@@ -1721,45 +1755,22 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         switch (cat) {
                             .fixed32 => {
                                 try e.print("if (packed_data.len % 4 != 0) return error.InvalidWireType;\n", .{});
-                                try e.print("const count = packed_data.len / 4;\n", .{});
-                                try e.print("const old = result.{f};\n", .{escaped});
-                                try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                                try e.print("try @\"{s}_list\".ensureUnusedCapacity(allocator, packed_data.len / 4);\n", .{field.name});
                             },
                             .fixed64 => {
                                 try e.print("if (packed_data.len % 8 != 0) return error.InvalidWireType;\n", .{});
-                                try e.print("const count = packed_data.len / 8;\n", .{});
-                                try e.print("const old = result.{f};\n", .{escaped});
-                                try e.print("const new = try allocator.alloc({s}, old.len + count);\n", .{types.scalar_zig_type(s)});
+                                try e.print("try @\"{s}_list\".ensureUnusedCapacity(allocator, packed_data.len / 8);\n", .{field.name});
                             },
                             .varint => {
-                                try e.print("const old = result.{f};\n", .{escaped});
-                                try e.print("const new = try allocator.alloc({s}, old.len + packed_data.len);\n", .{types.scalar_zig_type(s)});
+                                try e.print("try @\"{s}_list\".ensureUnusedCapacity(allocator, packed_data.len);\n", .{field.name});
                             },
                         }
-                        try e.print("errdefer allocator.free(new);\n", .{});
-                        try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         try e.print("var packed_iter = {s}.init(packed_data);\n", .{types.scalar_packed_iterator(s)});
-                        try e.print("var idx: usize = old.len;\n", .{});
-                        try e.print("while (try packed_iter.next()) |v| : (idx += 1) new[idx] = {s};\n", .{types.scalar_packed_decode_expr(s)});
-                        try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                        if (cat == .varint) {
-                            try e.print("result.{f} = try allocator.realloc(new, idx);\n", .{escaped});
-                        } else {
-                            try e.print("result.{f} = new;\n", .{escaped});
-                        }
+                        try e.print("while (try packed_iter.next()) |v| @\"{s}_list\".appendAssumeCapacity({s});\n", .{ field.name, types.scalar_packed_decode_expr(s) });
                         e.indent_level -= 1;
                         try e.print("}},\n", .{});
                         // Individual element case
-                        try e.print("{s} =>", .{types.scalar_wire_variant(s)});
-                        try e.open_brace();
-                        try e.print("const old = result.{f};\n", .{escaped});
-                        try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
-                        try e.print("@memcpy(new[0..old.len], old);\n", .{});
-                        try e.print("new[old.len] = {s};\n", .{types.scalar_decode_expr(s)});
-                        try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                        try e.print("result.{f} = new;\n", .{escaped});
-                        e.indent_level -= 1;
-                        try e.print("}},\n", .{});
+                        try e.print("{s} => try @\"{s}_list\".append(allocator, {s}),\n", .{ types.scalar_wire_variant(s), field.name, types.scalar_decode_expr(s) });
                         try e.print("else => return error.InvalidWireType,\n", .{});
                         // Close switch
                         e.indent_level -= 1;
@@ -1768,16 +1779,12 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                         // string/bytes: always LEN wire type, no packed encoding
                         try e.print_raw(" if (field.value == .len)", .{});
                         try e.open_brace();
-                        try e.print("const old = result.{f};\n", .{escaped});
-                        try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{types.scalar_zig_type(s)});
-                        try e.print("errdefer allocator.free(new);\n", .{});
-                        try e.print("@memcpy(new[0..old.len], old);\n", .{});
                         if (s == .string and syntax == .proto3) {
                             try e.print("try message.validate_utf8(field.value.len);\n", .{});
                         }
-                        try e.print("new[old.len] = try allocator.dupe(u8, field.value.len);\n", .{});
-                        try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                        try e.print("result.{f} = new;\n", .{escaped});
+                        try e.print("const _duped = try allocator.dupe(u8, field.value.len);\n", .{});
+                        try e.print("errdefer allocator.free(_duped);\n", .{});
+                        try e.print("try @\"{s}_list\".append(allocator, _duped);\n", .{field.name});
                         e.indent_level -= 1;
                         try e.print("}} else return error.InvalidWireType,\n", .{});
                     }
@@ -1851,13 +1858,9 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                 .repeated => {
                     try e.print_raw(" if (field.value == .len)", .{});
                     try e.open_brace();
-                    try e.print("const old = result.{f};\n", .{escaped});
-                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
-                    try e.print("errdefer allocator.free(new);\n", .{});
-                    try e.print("@memcpy(new[0..old.len], old);\n", .{});
-                    try e.print("new[old.len] = try @TypeOf(old[0]).decode_inner(allocator, field.value.len, depth_remaining - 1);\n", .{});
-                    try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                    try e.print("result.{f} = new;\n", .{escaped});
+                    try e.print("const _decoded = try {s}.decode_inner(allocator, field.value.len, depth_remaining - 1);\n", .{name});
+                    try e.print("errdefer {{ var _m = _decoded; _m.deinit(allocator); }}\n", .{});
+                    try e.print("try @\"{s}_list\".append(allocator, _decoded);\n", .{field.name});
                     e.indent_level -= 1;
                     try e.print("}} else return error.InvalidWireType,\n", .{});
                 },
@@ -1872,34 +1875,18 @@ fn emit_decode_field_case(e: *Emitter, field: ast.Field, syntax: ast.Syntax, rec
                 },
                 .repeated => {
                     // Handle both packed (LEN) and individual varint encoding
-                    // Already safe — switch on field.value with else => {}
                     try e.print_raw(" switch (field.value)", .{});
                     try e.open_brace();
                     // Packed encoding case
                     try e.print(".len => |packed_data|", .{});
                     try e.open_brace();
-                    try e.print("const old = result.{f};\n", .{escaped});
-                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + packed_data.len);\n", .{});
-                    try e.print("errdefer allocator.free(new);\n", .{});
-                    try e.print("@memcpy(new[0..old.len], old);\n", .{});
+                    try e.print("try @\"{s}_list\".ensureUnusedCapacity(allocator, packed_data.len);\n", .{field.name});
                     try e.print("var packed_iter = message.PackedVarintIterator.init(packed_data);\n", .{});
-                    try e.print("var idx: usize = old.len;\n", .{});
-                    try e.print("while (try packed_iter.next()) |v| : (idx += 1) new[idx] = {s};\n", .{packed_decode_expr});
-                    try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                    try e.print("result.{f} = try allocator.realloc(new, idx);\n", .{escaped});
+                    try e.print("while (try packed_iter.next()) |v| @\"{s}_list\".appendAssumeCapacity({s});\n", .{ field.name, packed_decode_expr });
                     e.indent_level -= 1;
                     try e.print("}},\n", .{});
                     // Individual varint case
-                    try e.print(".varint =>", .{});
-                    try e.open_brace();
-                    try e.print("const old = result.{f};\n", .{escaped});
-                    try e.print("const new = try allocator.alloc(@TypeOf(old[0]), old.len + 1);\n", .{});
-                    try e.print("@memcpy(new[0..old.len], old);\n", .{});
-                    try e.print("new[old.len] = {s};\n", .{decode_expr});
-                    try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-                    try e.print("result.{f} = new;\n", .{escaped});
-                    e.indent_level -= 1;
-                    try e.print("}},\n", .{});
+                    try e.print(".varint => try @\"{s}_list\".append(allocator, {s}),\n", .{ field.name, decode_expr });
                     try e.print("else => return error.InvalidWireType,\n", .{});
                     // Close switch
                     e.indent_level -= 1;
@@ -2123,17 +2110,59 @@ fn emit_decode_group_case(e: *Emitter, grp: ast.Group) !void {
         .repeated => {
             try e.print_raw("if (field.value == .sgroup)", .{});
             try e.open_brace();
-            try e.print("const old = result.{f};\n", .{escaped});
-            try e.print("const new = try allocator.alloc({s}, old.len + 1);\n", .{grp.name});
-            try e.print("errdefer allocator.free(new);\n", .{});
-            try e.print("@memcpy(new[0..old.len], old);\n", .{});
-            try e.print("new[old.len] = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1);\n", .{ grp.name, num });
-            try e.print("if (old.len > 0) allocator.free(old);\n", .{});
-            try e.print("result.{f} = new;\n", .{escaped});
+            try e.print("const _decoded = try {s}.decode_group_inner(allocator, &iter, {d}, depth_remaining - 1);\n", .{ grp.name, num });
+            try e.print("errdefer {{ var _m = _decoded; _m.deinit(allocator); }}\n", .{});
+            try e.print("try @\"{s}_list\".append(allocator, _decoded);\n", .{field_name});
             e.indent_level -= 1;
             try e.print("}} else return error.InvalidWireType,\n", .{});
         },
     }
+}
+
+/// Emit ArrayList declaration and errdefer for a repeated field's decode collector.
+fn emit_repeated_list_decl(e: *Emitter, field: ast.Field) !void {
+    const name = field.name;
+    switch (field.type_name) {
+        .scalar => |s| {
+            try e.print("var @\"{s}_list\": std.ArrayListUnmanaged({s}) = .empty;\n", .{ name, types.scalar_zig_type(s) });
+            if (s == .string or s == .bytes) {
+                try e.print("errdefer {{ for (@\"{s}_list\".items) |_item| allocator.free(_item); @\"{s}_list\".deinit(allocator); }}\n", .{ name, name });
+            } else {
+                try e.print("errdefer @\"{s}_list\".deinit(allocator);\n", .{name});
+            }
+        },
+        .named => |type_name| {
+            try e.print("var @\"{s}_list\": std.ArrayListUnmanaged({s}) = .empty;\n", .{ name, type_name });
+            try e.print("errdefer {{ for (@\"{s}_list\".items) |*_item| _item.deinit(allocator); @\"{s}_list\".deinit(allocator); }}\n", .{ name, name });
+        },
+        .enum_ref => {
+            const escaped = types.escape_zig_keyword(name);
+            try e.print("var @\"{s}_list\": std.ArrayListUnmanaged(std.meta.Elem(@TypeOf(result.{f}))) = .empty;\n", .{ name, escaped });
+            try e.print("errdefer @\"{s}_list\".deinit(allocator);\n", .{name});
+        },
+    }
+}
+
+/// Emit toOwnedSlice assignment to finalize a repeated field's ArrayList.
+fn emit_repeated_list_finalize(e: *Emitter, field: ast.Field) !void {
+    const escaped = types.escape_zig_keyword(field.name);
+    try e.print("result.{f} = try @\"{s}_list\".toOwnedSlice(allocator);\n", .{ escaped, field.name });
+}
+
+/// Emit ArrayList declaration and errdefer for a repeated group field.
+fn emit_repeated_group_list_decl(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    try e.print("var @\"{s}_list\": std.ArrayListUnmanaged({s}) = .empty;\n", .{ field_name, grp.name });
+    try e.print("errdefer {{ for (@\"{s}_list\".items) |*_item| _item.deinit(allocator); @\"{s}_list\".deinit(allocator); }}\n", .{ field_name, field_name });
+}
+
+/// Emit toOwnedSlice assignment to finalize a repeated group field's ArrayList.
+fn emit_repeated_group_list_finalize(e: *Emitter, grp: ast.Group) !void {
+    var name_buf: [256]u8 = undefined;
+    const field_name = group_field_name(grp.name, &name_buf);
+    const escaped = types.escape_zig_keyword(field_name);
+    try e.print("result.{f} = try @\"{s}_list\".toOwnedSlice(allocator);\n", .{ escaped, field_name });
 }
 
 /// Emit code to free the old value of a scalar string/bytes field before overwriting it.

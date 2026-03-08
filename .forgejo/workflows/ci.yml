@@ -84,7 +84,7 @@ jobs:
           git config user.name "Forgejo Actions"
           git config user.email "actions@noreply.localhost"
           git add build.zig.zon
-          git commit -m "Bump version to $new_version"
+          git commit -m "Bump version to $new_version [skip ci]"
           git push
 
   conformance-tests:
